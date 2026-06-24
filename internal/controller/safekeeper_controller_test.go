@@ -22,11 +22,11 @@ var _ = Describe("Safekeeper Controller", func() {
 	const (
 		clusterName    = "sk-suite"
 		safekeeperName = "sk-suite-sk0"
-		safekeeperID   = uint32(0)
+		safekeeperID   = uint32(1)
 	)
 	var (
 		namespace string
-		stsName   = clusterName + "-safekeeper-0"
+		stsName   = clusterName + "-safekeeper-1"
 	)
 
 	BeforeEach(func() {

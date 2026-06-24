@@ -32,8 +32,9 @@ type StorageConfig struct {
 
 // SafekeeperSpec defines the desired state of Safekeeper
 type SafekeeperSpec struct {
-	// ID which the safekeepers uses when registering with storage-controller
-	// This ID must be unique within the cluster.
+	// safekeeper 向 storage-controller 注册时使用的 ID。
+	// 必须 >= 1，且在集群内唯一。
+	// +kubebuilder:validation:Minimum:=1
 	ID uint32 `json:"id"`
 
 	// Used to deterministically setup which storage controller and broker to communicate with

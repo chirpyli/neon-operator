@@ -36,7 +36,8 @@ import (
 
 type SafekeeperReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme                   *runtime.Scheme
+	StorageControllerBaseURL string
 }
 
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=safekeepers,verbs=get;list;watch;create;update;patch;delete

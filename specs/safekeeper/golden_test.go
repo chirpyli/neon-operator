@@ -12,7 +12,7 @@ func TestSpecs(t *testing.T) {
 	const (
 		clusterName = "test-cluster"
 		namespace   = "neon"
-		skID        = uint32(0)
+		skID        = uint32(1)
 	)
 
 	sk := fixtures.NewSafekeeper("test-safekeeper", namespace, clusterName, skID)

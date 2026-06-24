@@ -6,7 +6,7 @@ metadata:
     molnett.org/cluster: test-cluster
     molnett.org/component: safekeeper
     molnett.org/safekeeper: test-safekeeper
-  name: test-cluster-safekeeper-0-headless
+  name: test-cluster-safekeeper-1-headless
   namespace: neon
 spec:
   clusterIP: None

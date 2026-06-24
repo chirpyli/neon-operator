@@ -6,14 +6,14 @@ metadata:
     molnett.org/cluster: test-cluster
     molnett.org/component: safekeeper
     molnett.org/safekeeper: test-safekeeper
-  name: test-cluster-safekeeper-0
+  name: test-cluster-safekeeper-1
   namespace: neon
 spec:
   replicas: 1
   selector:
     matchLabels:
       molnett.org/safekeeper: test-safekeeper
-  serviceName: test-cluster-safekeeper-0-headless
+  serviceName: test-cluster-safekeeper-1-headless
   template:
     metadata:
       creationTimestamp: null
@@ -24,11 +24,11 @@ spec:
     spec:
       containers:
       - args:
-        - --id=0
+        - --id=1
         - --broker-endpoint=http://test-cluster-storage-broker:50051
         - --listen-pg=0.0.0.0:5454
         - --listen-http=0.0.0.0:7676
-        - --advertise-pg=test-cluster-safekeeper-0:5454
+        - --advertise-pg=test-cluster-safekeeper-1:5454
         - --datadir
         - /data
         command:

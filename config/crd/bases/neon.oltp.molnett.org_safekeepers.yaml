@@ -55,9 +55,10 @@ spec:
                 type: string
               id:
                 description: |-
-                  ID which the safekeepers uses when registering with storage-controller
-                  This ID must be unique within the cluster.
+                  ID which the safekeeper uses when registering with storage-controller.
+                  Must be >= 1 and unique within the cluster.
                 format: int32
+                minimum: 1
                 type: integer
               storageConfig:
                 description: PVC configuration
