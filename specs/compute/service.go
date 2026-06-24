@@ -62,11 +62,39 @@ func AdminService(branch *neonv1alpha1.Branch, project *neonv1alpha1.Project) *c
 	})
 }
 
-func PostgresService(branch *neonv1alpha1.Branch, project *neonv1alpha1.Project) *corev1.Service {
-	return createService(branch, project, ServiceConfig{
+// PostgresService 创建 PostgreSQL 连接的 Service。
+// exposure 从 Cluster.Spec.PostgresExposure 读取并应用。
+func PostgresService(branch *neonv1alpha1.Branch, project *neonv1alpha1.Project, exposure *neonv1alpha1.ServiceExposure) *corev1.Service {
+	svc := createService(branch, project, ServiceConfig{
 		Suffix:    "postgres",
 		Component: "compute-postgres",
 		PortName:  "postgres",
 		Port:      55433,
 	})
+	applyServiceExposure(svc, exposure)
+	return svc
+}
+
+// applyServiceExposure 将 ServiceExposure 配置应用到 Service 对象
+func applyServiceExposure(svc *corev1.Service, exposure *neonv1alpha1.ServiceExposure) {
+	if exposure == nil {
+		return
+	}
+	if exposure.Type != "" {
+		svc.Spec.Type = exposure.Type
+	}
+	if exposure.ExternalTrafficPolicy != "" {
+		svc.Spec.ExternalTrafficPolicy = exposure.ExternalTrafficPolicy
+	}
+	if len(exposure.LoadBalancerSourceRanges) > 0 {
+		svc.Spec.LoadBalancerSourceRanges = exposure.LoadBalancerSourceRanges
+	}
+	if len(exposure.Annotations) > 0 {
+		if svc.Annotations == nil {
+			svc.Annotations = make(map[string]string)
+		}
+		for k, v := range exposure.Annotations {
+			svc.Annotations[k] = v
+		}
+	}
 }

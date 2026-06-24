@@ -27,13 +27,19 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
 	"oltp.molnett.org/neon-operator/specs/storagecontroller"
@@ -292,11 +298,95 @@ func (r *BranchReconciler) ensureTimeline(ctx context.Context, branch *neonv1alp
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *BranchReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// exposurePredicate 仅在 Cluster 的 PostgresExposure 变更时触发 Branch reconcile。
+	// 避免 neonImage、labels 等无关变更产生不必要的调和。
+	exposurePredicate := predicate.Funcs{
+		CreateFunc: func(e event.CreateEvent) bool {
+			// 跳过 controller 启动时的初始全量同步（Generation != 1 表示非首次创建），
+			// 避免启动阶段对全量 Branch 做无效调和。
+			return e.Object.GetGeneration() == 1
+		},
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			oldC := e.ObjectOld.(*neonv1alpha1.Cluster)
+			newC := e.ObjectNew.(*neonv1alpha1.Cluster)
+			return !equality.Semantic.DeepEqual(oldC.Spec.PostgresExposure, newC.Spec.PostgresExposure)
+		},
+		DeleteFunc: func(e event.DeleteEvent) bool {
+			// Cluster 删除时仍触发，关联 Branch 需要感知并做相应处理
+			return true
+		},
+		GenericFunc: func(e event.GenericEvent) bool {
+			return false
+		},
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&neonv1alpha1.Branch{}).
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
+		Watches(&neonv1alpha1.Cluster{},
+			handler.EnqueueRequestsFromMapFunc(r.clusterToBranchRequests),
+			builder.WithPredicates(exposurePredicate),
+		).
 		Named("branch").
 		Complete(r)
+}
+
+// clusterToBranchRequests 将 Cluster 变更映射为 Branch reconcile 请求。
+// 当 Cluster 的 postgresExposure 等配置变更时，触发关联的 Branch 重新 reconcile，
+// 以便 Branch controller 读取最新配置并更新 PostgresService。
+//
+// 映射链路: Cluster → Project(Spec.ClusterName) → Branch(Spec.ProjectID)
+func (r *BranchReconciler) clusterToBranchRequests(ctx context.Context, obj client.Object) []reconcile.Request {
+	cluster, ok := obj.(*neonv1alpha1.Cluster)
+	if !ok {
+		return nil
+	}
+
+	log := logf.FromContext(ctx)
+
+	// 1. 列出所有引用该 Cluster 的 Project
+	var projects neonv1alpha1.ProjectList
+	if err := r.List(ctx, &projects, client.InNamespace(cluster.Namespace)); err != nil {
+		log.Error(err, "failed to list Projects for Cluster watch", "cluster", cluster.Name)
+		return nil
+	}
+
+	// 2. 收集匹配 Cluster 的 Project ID
+	var projectIDs []string
+	for _, p := range projects.Items {
+		if p.Spec.ClusterName == cluster.Name {
+			projectIDs = append(projectIDs, p.Name)
+		}
+	}
+	if len(projectIDs) == 0 {
+		return nil
+	}
+
+	// 3. 列出所有属于这些 Project 的 Branch
+	var branches neonv1alpha1.BranchList
+	if err := r.List(ctx, &branches, client.InNamespace(cluster.Namespace)); err != nil {
+		log.Error(err, "failed to list Branches for Cluster watch", "cluster", cluster.Name)
+		return nil
+	}
+
+	var requests []reconcile.Request
+	for _, b := range branches.Items {
+		for _, pid := range projectIDs {
+			if b.Spec.ProjectID == pid {
+				requests = append(requests, reconcile.Request{
+					NamespacedName: types.NamespacedName{
+						Name:      b.Name,
+						Namespace: b.Namespace,
+					},
+				})
+				break
+			}
+		}
+	}
+
+	log.Info("Cluster change triggered Branch reconcile",
+		"cluster", cluster.Name, "branchCount", len(requests))
+	return requests
 }

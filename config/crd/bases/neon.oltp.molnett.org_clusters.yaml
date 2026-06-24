@@ -77,6 +77,47 @@ spec:
                 description: Decides how many safekeepers to run in the cluster.
                 minimum: 3
                 type: integer
+              postgresExposure:
+                description: |-
+                  PostgresExposure 控制计算节点 PostgreSQL Service 对外暴露策略。
+                  不设置时默认为 ClusterIP（仅集群内访问）。
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Annotations 透传到 Service 的 annotations。
+                      用于云厂商 LB 配置，如 AWS NLB、GCP LB 等。
+                    type: object
+                  externalTrafficPolicy:
+                    description: |-
+                      ExternalTrafficPolicy 控制外部流量的路由策略。
+                      Cluster：流量均匀分发到所有 Pod（默认，可能丢失源 IP）
+                      Local：  保留客户端真实 IP，但要求 Pod 在接收流量的节点上运行
+                    enum:
+                    - Cluster
+                    - Local
+                    type: string
+                  loadBalancerSourceRanges:
+                    description: |-
+                      LoadBalancerSourceRanges 限制可访问的源 IP CIDR 列表。
+                      仅在 Type=LoadBalancer 时生效。用于安全白名单。
+                    items:
+                      type: string
+                    type: array
+                  type:
+                    default: ClusterIP
+                    description: |-
+                      Type 决定 Service 类型。
+                      ClusterIP：仅集群内访问（默认）
+                      NodePort：  通过节点 IP + 端口对外暴露
+                      LoadBalancer：云环境自动创建外部 LB
+                    enum:
+                    - ClusterIP
+                    - NodePort
+                    - LoadBalancer
+                    type: string
+                type: object
               storageControllerDatabaseSecret:
                 description: |-
                   Reference to a Secret containing credentials for accessing a storage bucket.

@@ -81,12 +81,12 @@ func (r *SafekeeperReconciler) registerSafekeeperWithStorageController(
 
 	body := map[string]any{
 		"id":                   sk.Spec.ID,
-		"region_id":            "se-ume",			// fixme: 暂时硬编码，后续需要支持从集群配置文件中读取
+		"region_id":            "se-ume", // fixme: 暂时硬编码，后续需要支持从集群配置文件中读取
 		"version":              1,
 		"host":                 host,
 		"port":                 5454,
 		"http_port":            7676,
-		"availability_zone_id": "se-ume",           // fixme: 暂时硬编码，后续需要支持从集群配置文件中读取
+		"availability_zone_id": "se-ume", // fixme: 暂时硬编码，后续需要支持从集群配置文件中读取
 	}
 
 	bodyBytes, err := json.Marshal(body)

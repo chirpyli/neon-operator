@@ -315,12 +315,12 @@ func GenerateComputeSpec(
 
 	log.Info("Successfully retrieved JWT keys")
 
-	// 4. Construct safekeeper connections (always 3)
+	// 4. 构造 safekeeper 连接串（3 个 safekeeper，ID 从 1 开始）
 	safekeeperConnstrings := make([]string, 3)
 	for i := range 3 {
 		safekeeperConnstrings[i] = fmt.Sprintf(
 			"postgresql://postgres:@%s-safekeeper-%d.neon:5454",
-			clusterName, i,
+			clusterName, i+1,
 		)
 	}
 
@@ -615,7 +615,7 @@ func buildPostgresSettings(clusterName, tenantID, timelineID string) []SettingsE
 		{
 			Name: "neon.safekeepers",
 			Value: fmt.Sprintf(
-				"%s-safekeeper-0.neon:5454,%s-safekeeper-1.neon:5454,%s-safekeeper-2.neon:5454",
+				"%s-safekeeper-1.neon:5454,%s-safekeeper-2.neon:5454,%s-safekeeper-3.neon:5454",
 				clusterName, clusterName, clusterName,
 			),
 			Vartype: "string",

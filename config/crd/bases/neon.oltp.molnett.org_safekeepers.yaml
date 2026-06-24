@@ -55,8 +55,8 @@ spec:
                 type: string
               id:
                 description: |-
-                  ID which the safekeeper uses when registering with storage-controller.
-                  Must be >= 1 and unique within the cluster.
+                  safekeeper 向 storage-controller 注册时使用的 ID。
+                  必须 >= 1，且在集群内唯一。
                 format: int32
                 minimum: 1
                 type: integer

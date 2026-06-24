@@ -21,6 +21,36 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// ServiceExposure 控制 Service 对外暴露的方式。
+// 可用于 PostgreSQL Service 和未来的 Proxy Service。
+type ServiceExposure struct {
+	// Type 决定 Service 类型。
+	// ClusterIP：仅集群内访问（默认）
+	// NodePort：  通过节点 IP + 端口对外暴露
+	// LoadBalancer：云环境自动创建外部 LB
+	// +kubebuilder:default:="ClusterIP"
+	// +kubebuilder:validation:Enum=ClusterIP;NodePort;LoadBalancer
+	// +optional
+	Type corev1.ServiceType `json:"type,omitempty"`
+
+	// ExternalTrafficPolicy 控制外部流量的路由策略。
+	// Cluster：流量均匀分发到所有 Pod（默认，可能丢失源 IP）
+	// Local：  保留客户端真实 IP，但要求 Pod 在接收流量的节点上运行
+	// +kubebuilder:validation:Enum=Cluster;Local
+	// +optional
+	ExternalTrafficPolicy corev1.ServiceExternalTrafficPolicyType `json:"externalTrafficPolicy,omitempty"`
+
+	// LoadBalancerSourceRanges 限制可访问的源 IP CIDR 列表。
+	// 仅在 Type=LoadBalancer 时生效。用于安全白名单。
+	// +optional
+	LoadBalancerSourceRanges []string `json:"loadBalancerSourceRanges,omitempty"`
+
+	// Annotations 透传到 Service 的 annotations。
+	// 用于云厂商 LB 配置，如 AWS NLB、GCP LB 等。
+	// +optional
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
 // ClusterSpec defines the desired state of Cluster
 type ClusterSpec struct {
 	// Decides how many safekeepers to run in the cluster.
@@ -42,6 +72,11 @@ type ClusterSpec struct {
 	// Reference to a Secret containing credentials for accessing a storage bucket.
 	// Must have a field named "uri"
 	StorageControllerDatabaseSecret *corev1.SecretKeySelector `json:"storageControllerDatabaseSecret"`
+
+	// PostgresExposure 控制计算节点 PostgreSQL Service 对外暴露策略。
+	// 不设置时默认为 ClusterIP（仅集群内访问）。
+	// +optional
+	PostgresExposure *ServiceExposure `json:"postgresExposure,omitempty"`
 }
 
 // ClusterStatus defines the observed state of Cluster.

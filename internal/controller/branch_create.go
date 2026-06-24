@@ -190,7 +190,18 @@ func (r *BranchReconciler) reconcileAdminService(ctx context.Context, branch *ne
 func (r *BranchReconciler) reconcilePostgresService(ctx context.Context, branch *neonv1alpha1.Branch, project *neonv1alpha1.Project) error {
 	log := logf.FromContext(ctx)
 
-	intendedService := compute.PostgresService(branch, project)
+	// 读取 Cluster 的 postgresExposure 配置
+	cluster, err := r.getCluster(ctx, project.Spec.ClusterName, branch.Namespace)
+	if err != nil {
+		return err
+	}
+
+	var exposure *neonv1alpha1.ServiceExposure
+	if cluster.Spec.PostgresExposure != nil {
+		exposure = cluster.Spec.PostgresExposure
+	}
+
+	intendedService := compute.PostgresService(branch, project, exposure)
 
 	var currentService corev1.Service
 	getErr := r.Get(ctx, types.NamespacedName{Name: intendedService.Name, Namespace: branch.Namespace}, &currentService)
@@ -198,7 +209,7 @@ func (r *BranchReconciler) reconcilePostgresService(ctx context.Context, branch 
 		return fmt.Errorf("failed to get branch postgres Service: %w", getErr)
 	}
 
-	err := ctrl.SetControllerReference(branch, intendedService, r.Scheme)
+	err = ctrl.SetControllerReference(branch, intendedService, r.Scheme)
 	if err != nil {
 		return fmt.Errorf("failed to set controller reference for branch postgres Service: %w", err)
 	}

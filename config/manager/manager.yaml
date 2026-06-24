@@ -66,6 +66,7 @@ spec:
             - --controlplane-bind-address=:8082
           image: controller
           name: manager
+          imagePullPolicy: Always
           ports:
             - containerPort: 8082
               name: controlplane
