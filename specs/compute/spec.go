@@ -9,6 +9,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -315,17 +317,30 @@ func GenerateComputeSpec(
 
 	log.Info("Successfully retrieved JWT keys")
 
-	// 4. 构造 safekeeper 连接串（3 个 safekeeper，ID 从 1 开始）
-	safekeeperConnstrings := make([]string, 3)
-	for i := range 3 {
+	// 4. 查询集群实际的 Safekeeper CR，获取真实 ID 列表
+	safekeeperIDs, err := listSafekeeperIDs(ctx, k8sClient, clusterName)
+	if err != nil {
+		log.Warn("Failed to list safekeepers, falling back to default IDs 1,2,3", "error", err)
+		safekeeperIDs = []uint32{1, 2, 3}
+	}
+	if len(safekeeperIDs) == 0 {
+		log.Warn("No safekeepers found for cluster, falling back to default IDs 1,2,3",
+			"cluster", clusterName)
+		safekeeperIDs = []uint32{1, 2, 3}
+	}
+
+	log.Info("Using safekeeper IDs from cluster", "ids", safekeeperIDs)
+
+	safekeeperConnstrings := make([]string, len(safekeeperIDs))
+	for i, id := range safekeeperIDs {
 		safekeeperConnstrings[i] = fmt.Sprintf(
 			"postgresql://postgres:@%s-safekeeper-%d.neon:5454",
-			clusterName, i+1,
+			clusterName, id,
 		)
 	}
 
 	// 5. Build postgres settings
-	settings := buildPostgresSettings(clusterName, project.Spec.TenantID, branch.Spec.TimelineID)
+	settings := buildPostgresSettings(clusterName, safekeeperIDs, project.Spec.TenantID, branch.Spec.TimelineID)
 
 	// 6. Generate spec
 	shards := make(map[string]PageserverShardInfo)
@@ -389,7 +404,7 @@ func GenerateComputeSpec(
 				Roles: []Role{
 					{
 						Name:              "postgres",
-						EncryptedPassword: "b093c0d3b281ba6da1eacc608620abd8",
+						EncryptedPassword: "SCRAM-SHA-256$4096:Km5/BZAre9yFBET1xAdPNw==$44b7c0f429a55e012114486a11aac5ee37e6755c56d1f94ee411abb7437f1495:96d902e582558a407a3bb04fa1f9840dc57963fedcb636bbb5937febe90dca8e",
 						Options:           nil,
 					},
 				},
@@ -594,36 +609,57 @@ func getJWTKeysFromSecret(
 	}, nil
 }
 
-func buildPostgresSettings(clusterName, tenantID, timelineID string) []SettingsEntry {
+func buildPostgresSettings(clusterName string, safekeeperIDs []uint32, tenantID, timelineID string) []SettingsEntry {
+	skParts := make([]string, len(safekeeperIDs))
+	for i, id := range safekeeperIDs {
+		skParts[i] = fmt.Sprintf("%s-safekeeper-%d.neon:5454", clusterName, id)
+	}
+
 	return []SettingsEntry{
 		{Name: "fsync", Value: "off", Vartype: "bool"},
 		{Name: "wal_level", Value: "logical", Vartype: "enum"},
 		{Name: "wal_log_hints", Value: "on", Vartype: "bool"},
 		{Name: "log_connections", Value: "on", Vartype: "bool"},
 		{Name: "port", Value: "55433", Vartype: "integer"},
-		{Name: "shared_buffers", Value: "1MB", Vartype: "string"},
+		{Name: "shared_buffers", Value: "16MB", Vartype: "string"},
 		{Name: "max_connections", Value: "100", Vartype: "integer"},
 		{Name: "listen_addresses", Value: "0.0.0.0", Vartype: "string"},
 		{Name: "max_wal_senders", Value: "10", Vartype: "integer"},
 		{Name: "max_replication_slots", Value: "10", Vartype: "integer"},
 		{Name: "wal_sender_timeout", Value: "5s", Vartype: "string"},
 		{Name: "wal_keep_size", Value: "0", Vartype: "integer"},
-		{Name: "password_encryption", Value: "md5", Vartype: "enum"},
+		{Name: "password_encryption", Value: "scram-sha-256", Vartype: "enum"},
 		{Name: "restart_after_crash", Value: "off", Vartype: "bool"},
 		{Name: "synchronous_standby_names", Value: "walproposer", Vartype: "string"},
 		{Name: "shared_preload_libraries", Value: "neon", Vartype: "string"},
 		{
-			Name: "neon.safekeepers",
-			Value: fmt.Sprintf(
-				"%s-safekeeper-1.neon:5454,%s-safekeeper-2.neon:5454,%s-safekeeper-3.neon:5454",
-				clusterName, clusterName, clusterName,
-			),
+			Name:    "neon.safekeepers",
+			Value:   strings.Join(skParts, ","),
 			Vartype: "string",
 		},
 		{Name: "neon.timeline_id", Value: timelineID, Vartype: "string"},
 		{Name: "neon.tenant_id", Value: tenantID, Vartype: "string"},
 		{Name: "neon.max_file_cache_size", Value: "1GB", Vartype: "string"},
 	}
+}
+
+// listSafekeeperIDs 查询集群中所有 Safekeeper CR，提取 spec.id 并按升序排列返回。
+// 失败时返回 error，调用方自行决定降级策略。
+func listSafekeeperIDs(ctx context.Context, k8sClient client.Client, clusterName string) ([]uint32, error) {
+	skList := &neonv1alpha1.SafekeeperList{}
+	err := k8sClient.List(ctx, skList, client.MatchingLabels{
+		"molnett.org/cluster": clusterName,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list safekeepers: %w", err)
+	}
+
+	ids := make([]uint32, len(skList.Items))
+	for i, sk := range skList.Items {
+		ids[i] = sk.Spec.ID
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids, nil
 }
 
 // StorageControllerClient placeholder
