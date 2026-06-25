@@ -347,14 +347,64 @@ func GenerateComputeSpec(
 
 	var actualRequest *ComputeHookNotifyRequest
 	if request != nil {
+		// /notify-attach 路径：已有完整 shard 信息
 		actualRequest = request
 	} else {
-		// Create fallback request using storage controller client
+		// /spec 路径：需从 storage-controller 获取 shard 信息
 		storageClient := NewStorageControllerClient(clusterName)
-		tenantInfo, err := storageClient.GetTenantInfo(ctx, log, tenantID)
-		if err != nil {
-			log.Error("Failed to retrieve tenant info", "tenantID", tenantID, "error", err)
-			return nil, err
+
+		// Layer 2: 重试获取 TenantInfo，最多 3 次，间隔 1s/2s/4s 退避
+		var tenantInfo *TenantInfo
+		var lastErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			tenantInfo, lastErr = storageClient.GetTenantInfo(ctx, log, tenantID)
+			if lastErr == nil {
+				break
+			}
+			log.Warn("GetTenantInfo failed, retrying",
+				"attempt", attempt+1, "tenantID", tenantID, "error", lastErr)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(1<<attempt) * time.Second):
+			}
+		}
+
+		if lastErr != nil {
+			// Layer 3: storage-controller 不可达 → 返回 Empty 状态
+			// compute_ctl 将等待 /notify-attach → /configure 推送完整 spec
+			log.Warn("Storage controller unavailable, returning Empty status",
+				"tenantID", tenantID, "error", lastErr)
+
+			return &ComputeSpecResponse{
+				Spec: ComputeSpec{
+					FormatVersion:         1.0,
+					SuspendTimeoutSeconds: -1,
+					Cluster: ClusterConfig{
+						ClusterID: project.Spec.TenantID,
+						Name:      project.Name,
+						Roles: []Role{
+							{
+								Name:              "postgres",
+								EncryptedPassword: "SCRAM-SHA-256$4096:Km5/BZAre9yFBET1xAdPNw==$44b7c0f429a55e012114486a11aac5ee37e6755c56d1f94ee411abb7437f1495:96d902e582558a407a3bb04fa1f9840dc57963fedcb636bbb5937febe90dca8e",
+								Options:           nil,
+							},
+						},
+						Databases: []interface{}{},
+						Settings:  settings,
+					},
+					DeltaOperations:       []interface{}{},
+					SafekeeperConnstrings: safekeeperConnstrings,
+					PageserverConnectionInfo: PageserverConnectionInfo{
+						ShardCount: 0,
+						Shards:     map[string]PageserverShardInfo{},
+					},
+				},
+				ComputeCtlConfig: ComputeCtlConfig{
+					JWKS: jwks,
+				},
+				Status: "Empty",
+			}, nil // ← 返回 nil error，HTTP 层返回 200 而非 500
 		}
 
 		log.Info("Retrieved tenant info", "tenantID", tenantID, "shards", len(tenantInfo.Shards))

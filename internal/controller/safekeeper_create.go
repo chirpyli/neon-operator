@@ -97,7 +97,7 @@ func (r *SafekeeperReconciler) registerSafekeeperWithStorageController(
 	log.Info("Registering safekeeper with storage controller",
 		"url", url, "id", sk.Spec.ID, "host", host)
 
-	httpClient := &http.Client{Timeout: 10 * time.Second}
+	httpClient := &http.Client{Timeout: 30 * time.Second}
 	resp, err := httpClient.Post(url, "application/json", bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("failed to register safekeeper with storage controller: %w", err)

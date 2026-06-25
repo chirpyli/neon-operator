@@ -271,7 +271,7 @@ func (r *BranchReconciler) ensureTimeline(ctx context.Context, branch *neonv1alp
 	}
 
 	httpClient := &http.Client{
-		Timeout: 10 * time.Second,
+		Timeout: 30 * time.Second,
 	}
 
 	resp, err := httpClient.Post(storageControllerURL, "application/json", bytes.NewBuffer(bodyBytes))

@@ -17,6 +17,7 @@ func addRoutes(
 	k8sClient client.Client,
 	computeBaseURL string,
 ) {
+	// 处理compute_ctl发送来的配置请求，compute_ctl根据此请求返回的配置信息，来配置postgres实例
 	mux.Handle("/compute/api/v2/computes/{compute_id}/spec", logRequests(log, handleComputeSpec(log, k8sClient)))
 	mux.Handle("/healthz", logRequests(log, handleHealthCheck()))
 	mux.Handle("/readyz", logRequests(log, handleHealthCheck()))
