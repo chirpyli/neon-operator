@@ -113,8 +113,9 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(mgr)).To(Succeed())
 
 	Expect((&SafekeeperReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:                   mgr.GetClient(),
+		Scheme:                   mgr.GetScheme(),
+		StorageControllerBaseURL: storconFake.URL(),
 	}).SetupWithManager(mgr)).To(Succeed())
 	// +kubebuilder:scaffold:builder
 

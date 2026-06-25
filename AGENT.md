@@ -78,7 +78,7 @@ Operator 在 8080 端口上暴露 HTTP 接口：
 - `/metrics` — Prometheus 指标
 - `/` — 诊断信息
 
-## 其他
-neon 原理可通过源码进行分析：
+## neon源码
+获取neon相关的内容，可通过源码进行分析：
 - neon github仓库为：https://github.com/neondatabase/neon.git
 - neon 本地源码为：/home/postgres/works/opensource/neon

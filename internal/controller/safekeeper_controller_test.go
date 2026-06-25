@@ -8,10 +8,12 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
 	"oltp.molnett.org/neon-operator/test/fixtures"
@@ -30,10 +32,17 @@ var _ = Describe("Safekeeper Controller", func() {
 	)
 
 	BeforeEach(func() {
+		storconFake.Reset()
+		storconFake.RegisterSafekeeper = nil
+
 		namespace = newTestNamespace()
 		Expect(k8sClient.Create(ctx, fixtures.NewBucketCredsSecret(clusterName, namespace))).To(Succeed())
 		Expect(k8sClient.Create(ctx, fixtures.NewCluster(clusterName, namespace))).To(Succeed())
 		Expect(k8sClient.Create(ctx, fixtures.NewSafekeeper(safekeeperName, namespace, clusterName, safekeeperID))).To(Succeed())
+	})
+
+	AfterEach(func() {
+		storconFake.RegisterSafekeeper = nil
 	})
 
 	It("creates StatefulSet and services owned by the Safekeeper CR", func() {
@@ -84,4 +93,25 @@ var _ = Describe("Safekeeper Controller", func() {
 			g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
 		}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
 	})
+
+	It("removes finalizer and completes deletion normally", func() {
+		// Wait for Safekeeper to be created and stable.
+		Eventually(func(g Gomega) {
+			sk := &neonv1alpha1.Safekeeper{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: safekeeperName, Namespace: namespace}, sk)).To(Succeed())
+			g.Expect(controllerutil.ContainsFinalizer(sk, utils.FinalizerName)).To(BeTrue())
+		}, 15*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		sk := &neonv1alpha1.Safekeeper{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: safekeeperName, Namespace: namespace}, sk)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, sk)).To(Succeed())
+
+		// Safekeeper should eventually be removed.
+		Eventually(func() bool {
+			return apierrors.IsNotFound(k8sClient.Get(ctx,
+				types.NamespacedName{Name: safekeeperName, Namespace: namespace},
+				&neonv1alpha1.Safekeeper{}))
+		}, 15*time.Second, 200*time.Millisecond).Should(BeTrue(), "Safekeeper should be fully deleted")
+	})
+
 })

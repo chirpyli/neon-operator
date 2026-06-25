@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
@@ -56,11 +57,30 @@ func (r *SafekeeperReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	}()
 
 	safekeeper, err := r.getSafekeeper(ctx, req)
-	if err != nil || safekeeper == nil {
+	if err != nil {
 		return ctrl.Result{}, err
+	}
+	if safekeeper == nil {
+		return ctrl.Result{}, nil
 	}
 
 	ctx = context.WithValue(ctx, utils.SafekeeperNameKey, safekeeper.Name)
+
+	// === 删除路径：执行外部资源清理 ===
+	if !safekeeper.DeletionTimestamp.IsZero() {
+		return r.finalize(ctx, safekeeper)
+	}
+
+	// === 创建/更新路径：确保 Finalizer 存在 ===
+	if !controllerutil.ContainsFinalizer(safekeeper, utils.FinalizerName) {
+		controllerutil.AddFinalizer(safekeeper, utils.FinalizerName)
+		if err := r.Update(ctx, safekeeper); err != nil {
+			log.Error(err, "Failed to add finalizer")
+			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+		}
+		log.Info("Finalizer added to Safekeeper, requeuing")
+		return ctrl.Result{Requeue: true}, nil
+	}
 
 	result, err := r.reconcile(ctx, safekeeper)
 	if errors.Is(err, ErrRequeueAfterChange) {
@@ -105,6 +125,35 @@ func (r *SafekeeperReconciler) reconcile(ctx context.Context, safekeeper *neonv1
 	if createErr != nil {
 		return ctrl.Result{}, fmt.Errorf("not able to create safekeeper resources: %w", createErr)
 	}
+	return ctrl.Result{}, nil
+}
+
+// finalize 处理 Safekeeper 的删除逻辑。
+//
+// 当前实现直接移除 Finalizer，不向 Storage Controller 发送注销请求。
+//
+// TODO: 从 Storage Controller 注销 safekeeper 的逻辑待后续实现。
+// Neon 的 Storage Controller 目前没有 safekeeper 的 DELETE 端点，
+// 且 safekeeper 删除涉及数据迁移等问题，不可简单注销。
+// 详见 docs/design/safekeeper-deletion.md
+func (r *SafekeeperReconciler) finalize(ctx context.Context, sk *neonv1alpha1.Safekeeper) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	if !controllerutil.ContainsFinalizer(sk, utils.FinalizerName) {
+		return ctrl.Result{}, nil
+	}
+
+	log.Info("Finalizing Safekeeper deletion (Storage Controller deregistration not yet implemented)",
+		"safekeeper", sk.Name, "id", sk.Spec.ID)
+
+	controllerutil.RemoveFinalizer(sk, utils.FinalizerName)
+	if err := r.Update(ctx, sk); err != nil {
+		log.Error(err, "Failed to remove finalizer")
+		return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
+	}
+
+	log.Info("Finalizer removed, Safekeeper will be deleted by APIServer",
+		"safekeeper", sk.Name)
 	return ctrl.Result{}, nil
 }
 

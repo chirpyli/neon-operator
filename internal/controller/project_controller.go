@@ -34,6 +34,7 @@ import (
 	utilnet "k8s.io/apimachinery/pkg/util/net"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
@@ -75,6 +76,22 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	ctx = context.WithValue(ctx, utils.ProjectNameKey, project.Name)
+
+	// === 删除路径：执行外部资源清理 ===
+	if !project.DeletionTimestamp.IsZero() {
+		return r.finalize(ctx, project)
+	}
+
+	// === 创建/更新路径：确保 Finalizer 存在 ===
+	if !controllerutil.ContainsFinalizer(project, utils.FinalizerName) {
+		controllerutil.AddFinalizer(project, utils.FinalizerName)
+		if err := r.Update(ctx, project); err != nil {
+			log.Error(err, "Failed to add finalizer")
+			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+		}
+		log.Info("Finalizer added to Project, requeuing")
+		return ctrl.Result{Requeue: true}, nil
+	}
 
 	result, err := r.reconcile(ctx, project)
 	if errors.Is(err, ErrRequeueAfterChange) {
@@ -240,11 +257,126 @@ func (r *ProjectReconciler) ensureTenantOnPageserver(ctx context.Context, projec
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		log.Info("Storage controller returned error status", "status", resp.Status)
-		return fmt.Errorf("pageserver returned status: %s", resp.Status)
+		return fmt.Errorf("storage controller returned status: %s", resp.Status)
 	}
 
 	log.Info("Successfully created tenant on storage controller")
 	return nil
+}
+
+// finalize 处理 Project 的删除逻辑。在移除 Finalizer 之前，
+// 确保 Storage Controller 中的 tenant 先被删除。
+func (r *ProjectReconciler) finalize(ctx context.Context, project *neonv1alpha1.Project) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	if !controllerutil.ContainsFinalizer(project, utils.FinalizerName) {
+		return ctrl.Result{}, nil
+	}
+
+	log.Info("Finalizing Project deletion",
+		"project", project.Name, "tenantID", project.Spec.TenantID)
+
+	// 更新状态，标记正在进行终止清理
+	_ = utils.PatchStatus(ctx, r.Client, project, func(p *neonv1alpha1.Project) {
+		p.Status.ObservedGeneration = p.Generation
+		utils.SetCondition(p, &p.Status.Conditions, utils.ConditionTerminating,
+			metav1.ConditionTrue, utils.ReasonTerminating,
+			"正在从 Storage Controller 删除 tenant")
+		utils.SetCondition(p, &p.Status.Conditions, utils.ConditionAvailable,
+			metav1.ConditionFalse, utils.ReasonTerminating, "Project 正在被删除")
+	})
+
+	// 如果 tenant 从未创建，跳过外部清理
+	if project.Spec.TenantID == "" {
+		log.Info("TenantID 为空，跳过 tenant 删除",
+			"project", project.Name)
+		return r.removeFinalizer(ctx, project)
+	}
+
+	delErr := r.deleteTenant(ctx, project.Spec.ClusterName, project.Spec.TenantID)
+	if delErr != nil {
+		log.Error(delErr, "从 Storage Controller 删除 tenant 失败，将重试",
+			"project", project.Name, "tenantID", project.Spec.TenantID)
+
+		_ = utils.PatchStatus(ctx, r.Client, project, func(p *neonv1alpha1.Project) {
+			utils.SetCondition(p, &p.Status.Conditions, utils.ConditionTerminating,
+				metav1.ConditionTrue, utils.ReasonExternalCleanupFailed,
+				fmt.Sprintf("删除 tenant 失败: %v", delErr))
+		})
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
+	log.Info("已从 Storage Controller 删除 tenant",
+		"project", project.Name, "tenantID", project.Spec.TenantID)
+
+	return r.removeFinalizer(ctx, project)
+}
+
+// deleteTenant 向 Storage Controller 发送 DELETE 请求以删除 tenant。
+// 将 404 视为成功（幂等性保证）。
+func (r *ProjectReconciler) deleteTenant(ctx context.Context, clusterName, tenantID string) error {
+	log := logf.FromContext(ctx)
+
+	base := r.StorageControllerBaseURL
+	if base == "" {
+		base = storagecontroller.URL(clusterName)
+	}
+	deleteURL := fmt.Sprintf("%s/v1/tenant/%s", base, tenantID)
+
+	log.Info("Deleting tenant from Storage Controller", "url", deleteURL)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, deleteURL, nil)
+	if err != nil {
+		return fmt.Errorf("create delete request: %w", err)
+	}
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to connect to storage controller: %w", err)
+	}
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			log.Error(err, "failed to close response body")
+		}
+	}()
+
+	// 200: 删除成功
+	// 404: 已被删除（幂等）
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
+		log.Info("Tenant 删除请求成功", "status", resp.StatusCode)
+		return nil
+	}
+
+	return fmt.Errorf("storage controller 返回状态码 %d", resp.StatusCode)
+}
+
+// removeFinalizer 从 Project 中移除 Finalizer，允许 Kubernetes 完成删除。
+func (r *ProjectReconciler) removeFinalizer(ctx context.Context, project *neonv1alpha1.Project) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	// 重新获取以规避冲突
+	current := &neonv1alpha1.Project{}
+	if err := r.Get(ctx, types.NamespacedName{Name: project.Name, Namespace: project.Namespace}, current); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, fmt.Errorf("重新获取 project 以移除 finalizer: %w", err)
+	}
+
+	if !controllerutil.ContainsFinalizer(current, utils.FinalizerName) {
+		return ctrl.Result{}, nil
+	}
+
+	controllerutil.RemoveFinalizer(current, utils.FinalizerName)
+	if err := r.Update(ctx, current); err != nil {
+		log.Error(err, "移除 finalizer 失败")
+		return ctrl.Result{}, fmt.Errorf("移除 finalizer: %w", err)
+	}
+
+	log.Info("Finalizer 已移除，Project 将由 APIServer 删除",
+		"project", project.Name)
+	return ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.

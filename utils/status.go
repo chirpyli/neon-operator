@@ -34,6 +34,7 @@ import (
 const (
 	ConditionAvailable                  = "Available"
 	ConditionProgressing                = "Progressing"
+	ConditionTerminating                = "Terminating"
 	ConditionStorageControllerAvailable = "StorageControllerAvailable"
 	ConditionStorageBrokerAvailable     = "StorageBrokerAvailable"
 	ConditionTenantIDAssigned           = "TenantIDAssigned"
@@ -47,6 +48,9 @@ const (
 const (
 	ReasonAsExpected                   = "AsExpected"
 	ReasonReconciling                  = "Reconciling"
+	ReasonTerminating                  = "Terminating"
+	ReasonExternalCleanupFailed        = "ExternalCleanupFailed"
+	ReasonParentResourceMissing        = "ParentResourceMissing"
 	ReasonChildPodNotReady             = "ChildPodNotReady"
 	ReasonChildDeploymentNotAvailable  = "ChildDeploymentNotAvailable"
 	ReasonChildResourceMissing         = "ChildResourceMissing"
