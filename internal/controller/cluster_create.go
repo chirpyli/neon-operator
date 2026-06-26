@@ -18,6 +18,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
+	pageserverspec "oltp.molnett.org/neon-operator/specs/pageserver"
 	safekeeperspec "oltp.molnett.org/neon-operator/specs/safekeeper"
 	"oltp.molnett.org/neon-operator/specs/storagebroker"
 	"oltp.molnett.org/neon-operator/specs/storagecontroller"
@@ -43,7 +44,12 @@ func (r *ClusterReconciler) createClusterResources(ctx context.Context, cluster 
 	}
 
 	log.Info("Reconciling safekeepers")
-	return r.reconcileSafekeepers(ctx, cluster)
+	if err := r.reconcileSafekeepers(ctx, cluster); err != nil {
+		return err
+	}
+
+	log.Info("Reconciling pageservers")
+	return r.reconcilePageservers(ctx, cluster)
 }
 
 // reconcileSafekeepers 确保集群的 Safekeeper CR 数量正确，
@@ -224,4 +230,130 @@ func (r *ClusterReconciler) reconcileStorageBroker(ctx context.Context, cluster 
 	return utils.ReconcileSSA(ctx, r.Client, r.Scheme, cluster, svc, func(cur *corev1.Service) bool {
 		return !equality.Semantic.DeepDerivative(svc.Spec, cur.Spec)
 	})
+}
+
+// reconcilePageservers 确保集群的 Pageserver CR 数量正确，
+// 创建缺失的 CR 并删除多余的 CR（缩容时执行安全 drain）。
+func (r *ClusterReconciler) reconcilePageservers(
+	ctx context.Context,
+	cluster *neonv1alpha1.Cluster,
+) error {
+	desired := int(cluster.Spec.NumPageservers)
+
+	// 列出此集群已拥有的 Pageserver CR
+	var existing neonv1alpha1.PageserverList
+	if err := r.List(ctx, &existing,
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels{
+			pageserverspec.ClusterLabel: cluster.Name,
+		},
+	); err != nil {
+		return fmt.Errorf("列出 pageserver: %w", err)
+	}
+
+	// 建立已有 ID 的映射
+	existingMap := make(map[uint64]*neonv1alpha1.Pageserver)
+	for i := range existing.Items {
+		ps := &existing.Items[i]
+		existingMap[ps.Spec.ID] = ps
+	}
+
+	// 创建缺失的 Pageserver CR（ID 从 1 开始）
+	for id := uint64(1); id <= uint64(desired); id++ {
+		if _, exists := existingMap[id]; !exists {
+			if err := r.createPageserver(ctx, cluster, id); err != nil {
+				return fmt.Errorf("创建 pageserver %d: %w", id, err)
+			}
+		}
+	}
+
+	// 删除多余的 Pageserver CR（缩容，按 ID 降序）
+	for _, ps := range existingMap {
+		if ps.Spec.ID > uint64(desired) {
+			if err := r.deletePageserver(ctx, ps); err != nil {
+				return fmt.Errorf("删除 pageserver %d: %w", ps.Spec.ID, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// createPageserver 为指定集群和 ID 创建一个新的 Pageserver CR。
+func (r *ClusterReconciler) createPageserver(
+	ctx context.Context,
+	cluster *neonv1alpha1.Cluster,
+	id uint64,
+) error {
+	log := logf.FromContext(ctx)
+
+	storageSize := "100Gi"
+	initialSchedulingPolicy := "Active"
+	if cluster.Spec.DefaultPageserverConfig != nil {
+		if cluster.Spec.DefaultPageserverConfig.StorageSize != "" {
+			storageSize = cluster.Spec.DefaultPageserverConfig.StorageSize
+		}
+		if cluster.Spec.DefaultPageserverConfig.InitialSchedulingPolicy != "" {
+			initialSchedulingPolicy = cluster.Spec.DefaultPageserverConfig.InitialSchedulingPolicy
+		}
+	}
+
+	ps := &neonv1alpha1.Pageserver{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pageserverName(cluster.Name, id),
+			Namespace: cluster.Namespace,
+			Labels: map[string]string{
+				pageserverspec.ClusterLabel: cluster.Name,
+			},
+		},
+		Spec: neonv1alpha1.PageserverSpec{
+			ID:                      id,
+			Cluster:                 cluster.Name,
+			InitialSchedulingPolicy: initialSchedulingPolicy,
+			BucketCredentialsSecret: cluster.Spec.BucketCredentialsSecret,
+			StorageConfig: neonv1alpha1.StorageConfig{
+				Size: storageSize,
+				// StorageClass 由 PS Controller 使用默认值或从集群配置获取
+			},
+		},
+	}
+
+	// 传递资源限制配置
+	if cluster.Spec.DefaultPageserverConfig != nil && cluster.Spec.DefaultPageserverConfig.Resources != nil {
+		ps.Spec.Resources = cluster.Spec.DefaultPageserverConfig.Resources
+	}
+
+	// 传递节点故障恢复配置
+	if cluster.Spec.DefaultPageserverConfig != nil && cluster.Spec.DefaultPageserverConfig.NodeFailure != nil {
+		ps.Spec.NodeFailure = cluster.Spec.DefaultPageserverConfig.NodeFailure
+	}
+
+	if err := ctrl.SetControllerReference(cluster, ps, r.Scheme); err != nil {
+		return err
+	}
+
+	log.Info("正在创建 Pageserver CR", "name", ps.Name, "id", id)
+	return r.Create(ctx, ps)
+}
+
+// deletePageserver 发起删除一个多余的 Pageserver CR。
+// 缩容时 Cluster Controller 发起删除后，PS Controller 的 finalizer
+// 会先执行 SC drain 再移除 finalizer（安全下线）。
+func (r *ClusterReconciler) deletePageserver(
+	ctx context.Context,
+	ps *neonv1alpha1.Pageserver,
+) error {
+	log := logf.FromContext(ctx)
+
+	if ps.DeletionTimestamp != nil {
+		return nil // 已在删除中
+	}
+
+	log.Info("正在删除多余的 Pageserver CR（将触发安全下线）", "name", ps.Name, "id", ps.Spec.ID)
+	return r.Delete(ctx, ps)
+}
+
+// pageserverName 返回 Pageserver CR 的标准名称。
+func pageserverName(clusterName string, id uint64) string {
+	return fmt.Sprintf("%s-pageserver-%d", clusterName, id)
 }

@@ -68,6 +68,99 @@ spec:
                   Default PostgreSQL version to use if no version is specified in projects.
                   kubebuilder:validation:Enum=14;15;16;17
                 type: integer
+              defaultPageserverConfig:
+                description: DefaultPageserverConfig 指定自动创建的 pageserver 的默认配置。
+                properties:
+                  initialSchedulingPolicy:
+                    default: Active
+                    description: |-
+                      InitialSchedulingPolicy 新节点注册后的初始 SC 调度策略。
+                      "Active"（默认）：立即参与全量调度。
+                      "Filling"：仅接收新 shard placement（用于新节点预热）。
+                    enum:
+                    - Active
+                    - Filling
+                    type: string
+                  nodeFailure:
+                    description: |-
+                      NodeFailure 控制节点故障时的自动恢复策略。
+                      用于为自动创建的 Pageserver 统一设置故障恢复行为。
+                    properties:
+                      autoRecover:
+                        description: |-
+                          AutoRecover 是否在节点宕机时自动删除 PVC 并重建。
+                          默认 false（需要人工确认），可设为 true 启用自动恢复。
+                        type: boolean
+                      maxPendingDuration:
+                        description: |-
+                          MaxPendingDuration 在判定 PVC 无法恢复前，Pod Pending 的最大等待时间。
+                          默认 5 分钟。
+                        type: string
+                    type: object
+                  resources:
+                    description: Resources 指定 PS 的 CPU/内存配置。若未设置，使用 operator 内置默认值。
+                    properties:
+                      claims:
+                        description: |-
+                          Claims lists the names of resources, defined in spec.resourceClaims,
+                          that are used by this container.
+
+                          This is an alpha field and requires enabling the
+                          DynamicResourceAllocation feature gate.
+
+                          This field is immutable. It can only be set for containers.
+                        items:
+                          description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                          properties:
+                            name:
+                              description: |-
+                                Name must match the name of one entry in pod.spec.resourceClaims of
+                                the Pod where this field is used. It makes that resource available
+                                inside a container.
+                              type: string
+                            request:
+                              description: |-
+                                Request is the name chosen for a request in the referenced claim.
+                                If empty, everything from the claim is made available, otherwise
+                                only the result of this request.
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      limits:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Limits describes the maximum amount of compute resources allowed.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                      requests:
+                        additionalProperties:
+                          anyOf:
+                          - type: integer
+                          - type: string
+                          pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                          x-kubernetes-int-or-string: true
+                        description: |-
+                          Requests describes the minimum amount of compute resources required.
+                          If Requests is omitted for a container, it defaults to Limits if that is explicitly specified,
+                          otherwise to an implementation-defined value. Requests cannot exceed Limits.
+                          More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
+                        type: object
+                    type: object
+                  storageSize:
+                    default: 100Gi
+                    description: StorageSize 指定 PS 的 PVC 大小。
+                    type: string
+                type: object
               defaultSafekeeperStorage:
                 description: |-
                   DefaultSafekeeperStorage defines the default storage config for
@@ -88,6 +181,15 @@ spec:
                 default: neondatabase/neon:8463
                 description: The default Neon image to use for all neon-specific resources.
                 type: string
+              numPageservers:
+                default: 1
+                description: |-
+                  NumPageservers 指定期望的 pageserver 数量。
+                  pageserver 是 cell 内的存储节点，数量由容量需求决定。
+                  默认为 1（开发测试），生产环境建议 ≥ 2。
+                format: int32
+                minimum: 1
+                type: integer
               numSafekeepers:
                 default: 3
                 description: Decides how many safekeepers to run in the cluster.

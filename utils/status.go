@@ -38,12 +38,18 @@ const (
 	ConditionStorageControllerAvailable = "StorageControllerAvailable"
 	ConditionStorageBrokerAvailable     = "StorageBrokerAvailable"
 	ConditionSafekeepersAvailable       = "SafekeepersAvailable"
+	ConditionPageserversAvailable       = "PageserversAvailable"
 	ConditionTenantIDAssigned           = "TenantIDAssigned"
 	ConditionAttached                   = "Attached"
 	ConditionTimelineIDAssigned         = "TimelineIDAssigned"
 	ConditionTimelineCreated            = "TimelineCreated"
 	ConditionComputeReady               = "ComputeReady"
 	ConditionResourcesReady             = "ResourcesReady"
+	ConditionDraining                   = "Draining"
+	ConditionDrainComplete              = "DrainComplete"
+	ConditionDrainTimeout               = "DrainTimeout"
+	ConditionNodeRecoveryInProgress     = "NodeRecoveryInProgress"
+	ConditionRegisteredWithSC           = "RegisteredWithSC"
 )
 
 const (
@@ -62,6 +68,11 @@ const (
 	ReasonTenantIDPending              = "TenantIDPending"
 	ReasonTimelineIDPending            = "TimelineIDPending"
 	ReasonTimelineCreationFailed       = "TimelineCreationFailed"
+	ReasonDrainStarted                 = "DrainStarted"
+	ReasonDrainStuck                   = "DrainStuck"
+	ReasonDrainFailed                  = "DrainFailed"
+	ReasonNoSchedulableNodes           = "NoSchedulableNodes"
+	ReasonForceDelete                  = "ForceDelete"
 )
 
 // StatusObject is implemented by every CRD with a Status subresource so PatchStatus

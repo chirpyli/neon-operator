@@ -51,12 +51,47 @@ type ServiceExposure struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
+// PageserverConfig 定义自动创建的 Pageserver 的默认配置。
+type PageserverConfig struct {
+	// StorageSize 指定 PS 的 PVC 大小。
+	// +kubebuilder:default:="100Gi"
+	StorageSize string `json:"storageSize,omitempty"`
+
+	// Resources 指定 PS 的 CPU/内存配置。若未设置，使用 operator 内置默认值。
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+
+	// InitialSchedulingPolicy 新节点注册后的初始 SC 调度策略。
+	// "Active"（默认）：立即参与全量调度。
+	// "Filling"：仅接收新 shard placement（用于新节点预热）。
+	// +kubebuilder:default:="Active"
+	// +kubebuilder:validation:Enum=Active;Filling
+	// +optional
+	InitialSchedulingPolicy string `json:"initialSchedulingPolicy,omitempty"`
+
+	// NodeFailure 控制节点故障时的自动恢复策略。
+	// 用于为自动创建的 Pageserver 统一设置故障恢复行为。
+	// +optional
+	NodeFailure *NodeFailureRecoveryConfig `json:"nodeFailure,omitempty"`
+}
+
 // ClusterSpec defines the desired state of Cluster
 type ClusterSpec struct {
 	// Decides how many safekeepers to run in the cluster.
 	// +kubebuilder:default:=3
 	// +kubebuilder:validation:Minimum:=3
 	NumSafekeepers uint8 `json:"numSafekeepers"`
+
+	// NumPageservers 指定期望的 pageserver 数量。
+	// pageserver 是 cell 内的存储节点，数量由容量需求决定。
+	// 默认为 1（开发测试），生产环境建议 ≥ 2。
+	// +kubebuilder:default:=1
+	// +kubebuilder:validation:Minimum:=1
+	NumPageservers int32 `json:"numPageservers,omitempty"`
+
+	// DefaultPageserverConfig 指定自动创建的 pageserver 的默认配置。
+	// +optional
+	DefaultPageserverConfig *PageserverConfig `json:"defaultPageserverConfig,omitempty"`
 
 	// Default PostgreSQL version to use if no version is specified in projects.
 	// kubebuilder:validation:Enum=14;15;16;17

@@ -238,8 +238,9 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.PageserverReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		SCClient: controller.NewSCClient(mgr.GetClient(), mgr.GetAPIReader(), ""),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Pageserver")
 		os.Exit(1)

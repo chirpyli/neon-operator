@@ -7,6 +7,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	"oltp.molnett.org/neon-operator/api/v1alpha1"
@@ -23,6 +24,18 @@ echo "{\"host\":\"%s.%s\"," \
 
 cp /configmap/pageserver.toml /config/pageserver.toml
 `
+
+// DefaultResources are the default CPU/memory requests and limits for pageserver.
+var DefaultResources = corev1.ResourceRequirements{
+	Requests: corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("500m"),
+		corev1.ResourceMemory: resource.MustParse("256Mi"),
+	},
+	Limits: corev1.ResourceList{
+		corev1.ResourceCPU:    resource.MustParse("2"),
+		corev1.ResourceMemory: resource.MustParse("512Mi"),
+	},
+}
 
 func StatefulSet(ps *v1alpha1.Pageserver, image string) *appsv1.StatefulSet {
 	name := Name(ps)
@@ -78,6 +91,20 @@ func podSpec(ps *v1alpha1.Pageserver, image, serviceName string) corev1.PodSpec 
 			RunAsGroup: ptr.To(int64(1000)),
 			FSGroup:    ptr.To(int64(1000)),
 		},
+		// PodAntiAffinity 确保 pageserver 分布在不同的节点上
+		Affinity: &corev1.Affinity{
+			PodAntiAffinity: &corev1.PodAntiAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+					{
+						LabelSelector: &metav1.LabelSelector{
+							MatchLabels: LabelSelector(ps),
+						},
+						TopologyKey: "kubernetes.io/hostname",
+					},
+				},
+			},
+		},
+		TerminationGracePeriodSeconds: ptr.To(int64(60)),
 		InitContainers: []corev1.Container{
 			{
 				Name:    "setup-config",
@@ -102,11 +129,11 @@ func podSpec(ps *v1alpha1.Pageserver, image, serviceName string) corev1.PodSpec 
 				ImagePullPolicy: corev1.PullAlways,
 				Command:         []string{"/usr/local/bin/pageserver"},
 				Ports: []corev1.ContainerPort{
-					{ContainerPort: 6400},
-					{ContainerPort: 9898},
+					{Name: "pg", ContainerPort: 6400},
+					{Name: "http", ContainerPort: 9898},
 				},
 				Env: []corev1.EnvVar{
-					{Name: "RUST_LOG", Value: "debug"},
+					{Name: "RUST_LOG", Value: "info,pageserver=info,walredo=warn"},
 					{Name: "DEFAULT_PG_VERSION", Value: "16"},
 					bucketEnv("AWS_ACCESS_KEY_ID", ps),
 					bucketEnv("AWS_SECRET_ACCESS_KEY", ps),
@@ -114,6 +141,47 @@ func podSpec(ps *v1alpha1.Pageserver, image, serviceName string) corev1.PodSpec 
 					bucketEnv("BUCKET_NAME", ps),
 					bucketEnv("AWS_ENDPOINT_URL", ps),
 				},
+				// Health probes using /v1/status endpoint
+				LivenessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path:   "/v1/status",
+							Port:   intstr.FromInt(9898),
+							Scheme: corev1.URISchemeHTTP,
+						},
+					},
+					InitialDelaySeconds: 30,
+					PeriodSeconds:       10,
+					TimeoutSeconds:      5,
+					FailureThreshold:    3,
+				},
+				ReadinessProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path:   "/v1/status",
+							Port:   intstr.FromInt(9898),
+							Scheme: corev1.URISchemeHTTP,
+						},
+					},
+					InitialDelaySeconds: 10,
+					PeriodSeconds:       5,
+					TimeoutSeconds:      3,
+					FailureThreshold:    2,
+				},
+				StartupProbe: &corev1.Probe{
+					ProbeHandler: corev1.ProbeHandler{
+						HTTPGet: &corev1.HTTPGetAction{
+							Path:   "/v1/status",
+							Port:   intstr.FromInt(9898),
+							Scheme: corev1.URISchemeHTTP,
+						},
+					},
+					InitialDelaySeconds: 10,
+					PeriodSeconds:       10,
+					TimeoutSeconds:      5,
+					FailureThreshold:    30, // 最多等 300s，冷启动需要从 S3 加载
+				},
+				Resources: pageserverResources(ps),
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: storageVolumeName, MountPath: "/data/.neon/tenants"},
 					{Name: "config", MountPath: "/data/.neon"},
@@ -137,6 +205,15 @@ func podSpec(ps *v1alpha1.Pageserver, image, serviceName string) corev1.PodSpec 
 			},
 		},
 	}
+}
+
+// pageserverResources returns the resource requirements for the pageserver container.
+// If the PS spec specifies resources, use those. Otherwise use defaults.
+func pageserverResources(ps *v1alpha1.Pageserver) corev1.ResourceRequirements {
+	if ps.Spec.Resources != nil {
+		return *ps.Spec.Resources
+	}
+	return DefaultResources
 }
 
 func bucketEnv(key string, ps *v1alpha1.Pageserver) corev1.EnvVar {

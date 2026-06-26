@@ -3,6 +3,9 @@ kind: StatefulSet
 metadata:
   creationTimestamp: null
   labels:
+    app.kubernetes.io/component: pageserver
+    app.kubernetes.io/name: pageserver
+    app.kubernetes.io/part-of: neon
     molnett.org/cluster: test-cluster
     molnett.org/component: pageserver
     molnett.org/pageserver: test-pageserver
@@ -18,16 +21,27 @@ spec:
     metadata:
       creationTimestamp: null
       labels:
+        app.kubernetes.io/component: pageserver
+        app.kubernetes.io/name: pageserver
+        app.kubernetes.io/part-of: neon
         molnett.org/cluster: test-cluster
         molnett.org/component: pageserver
         molnett.org/pageserver: test-pageserver
     spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                app.kubernetes.io/component: pageserver
+                molnett.org/cluster: test-cluster
+            topologyKey: kubernetes.io/hostname
       containers:
       - command:
         - /usr/local/bin/pageserver
         env:
         - name: RUST_LOG
-          value: debug
+          value: info,pageserver=info,walredo=warn
         - name: DEFAULT_PG_VERSION
           value: "16"
         - name: AWS_ACCESS_KEY_ID
@@ -57,11 +71,46 @@ spec:
               name: test-cluster-bucket-creds
         image: neondatabase/neon:8463
         imagePullPolicy: Always
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /v1/status
+            port: 9898
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
         name: pageserver
         ports:
         - containerPort: 6400
+          name: pg
         - containerPort: 9898
-        resources: {}
+          name: http
+        readinessProbe:
+          failureThreshold: 2
+          httpGet:
+            path: /v1/status
+            port: 9898
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+        resources:
+          limits:
+            cpu: "2"
+            memory: 512Mi
+          requests:
+            cpu: 500m
+            memory: 256Mi
+        startupProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /v1/status
+            port: 9898
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
         volumeMounts:
         - mountPath: /data/.neon/tenants
           name: pageserver-storage
@@ -93,6 +142,7 @@ spec:
         fsGroup: 1000
         runAsGroup: 1000
         runAsUser: 1000
+      terminationGracePeriodSeconds: 60
       volumes:
       - configMap:
           name: test-cluster-pageserver-0
@@ -104,6 +154,9 @@ spec:
   - metadata:
       creationTimestamp: null
       labels:
+        app.kubernetes.io/component: pageserver
+        app.kubernetes.io/name: pageserver
+        app.kubernetes.io/part-of: neon
         molnett.org/cluster: test-cluster
         molnett.org/component: pageserver
         molnett.org/pageserver: test-pageserver

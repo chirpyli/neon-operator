@@ -6,6 +6,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/types"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -39,15 +40,30 @@ func (r *PageserverReconciler) createPageserverResources(ctx context.Context, ps
 		return err
 	}
 
+	log.Info("Reconciling pageserver PDB")
+	pdb := pageserver.PodDisruptionBudget(ps)
+	if err := utils.ReconcileSSA(ctx, r.Client, r.Scheme, ps, pdb, func(cur *policyv1.PodDisruptionBudget) bool {
+		return !equality.Semantic.DeepDerivative(pdb.Spec, cur.Spec)
+	}); err != nil {
+		return err
+	}
+
 	log.Info("Reconciling pageserver StatefulSet")
 	var cluster neonv1alpha1.Cluster
 	if err := r.Get(ctx, types.NamespacedName{Name: ps.Spec.Cluster, Namespace: ps.Namespace}, &cluster); err != nil {
 		return fmt.Errorf("failed to get parent cluster: %w", err)
 	}
 	sts := pageserver.StatefulSet(ps, cluster.Spec.NeonImage)
-	return utils.ReconcileSSA(ctx, r.Client, r.Scheme, ps, sts, func(cur *appsv1.StatefulSet) bool {
+	if err := utils.ReconcileSSA(ctx, r.Client, r.Scheme, ps, sts, func(cur *appsv1.StatefulSet) bool {
 		return !equality.Semantic.DeepDerivative(sts.Spec, cur.Spec)
-	})
+	}); err != nil {
+		return err
+	}
+
+	// 向 Storage Controller 同步 pageserver 状态（如已注册）
+	r.syncSCState(ctx, ps)
+
+	return nil
 }
 
 func (r *PageserverReconciler) reconcileConfigMap(ctx context.Context, ps *neonv1alpha1.Pageserver) error {

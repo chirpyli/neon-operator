@@ -231,6 +231,201 @@ func (c *SCClient) generateJWT(ctx context.Context, clusterName, namespace strin
 	return jm.GenerateToken(claims)
 }
 
+// =============================================================================
+// Pageserver Node Management APIs
+// =============================================================================
+
+// NodeDescribeResponse mirrors SC's NodeDescribeResponse for the
+// GET /control/v1/node and GET /control/v1/node/:id endpoints.
+type NodeDescribeResponse struct {
+	ID               uint64 `json:"id"`
+	Availability     string `json:"availability"`
+	Scheduling       string `json:"scheduling"`
+	ListenHTTPAddr   string `json:"listen_http_addr"`
+	ListenPGAddr     string `json:"listen_pg_addr"`
+	ListenHTTPPort   int32  `json:"listen_http_port"`
+	ListenPGPort     int32  `json:"listen_pg_port"`
+	Host             string `json:"host"`
+	AvailabilityZone string `json:"availability_zone_id"`
+}
+
+// NodeListResponse mirrors SC's response for GET /control/v1/node.
+type NodeListResponse struct {
+	Nodes []NodeDescribeResponse `json:"nodes"`
+}
+
+// ShardDescribeResponse mirrors SC's shard info for
+// GET /control/v1/node/:id/shards.
+type ShardDescribeResponse struct {
+	TenantShardID string `json:"tenant_shard_id"`
+	Attached      bool   `json:"attached"`
+	Secondary     bool   `json:"secondary"`
+}
+
+// NodeShardsResponse mirrors SC's response for GET /control/v1/node/:id/shards.
+type NodeShardsResponse struct {
+	Shards []ShardDescribeResponse `json:"shards"`
+}
+
+// nodeConfigRequest is the request body for PUT /control/v1/node/:id/config.
+type nodeConfigRequest struct {
+	Availability *string `json:"availability,omitempty"`
+	Scheduling   *string `json:"scheduling,omitempty"`
+}
+
+// GetNode calls GET /control/v1/node/:node_id to get a single node's status.
+func (c *SCClient) GetNode(ctx context.Context, clusterName, namespace string, nodeID uint64) (*NodeDescribeResponse, error) {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/control/v1/node/%d", baseURL, nodeID)
+
+	resp, err := c.doRequestGet(ctx, namespace, clusterName, url)
+	if err != nil {
+		return nil, fmt.Errorf("get node %d: %w", nodeID, err)
+	}
+
+	var node NodeDescribeResponse
+	if err := json.Unmarshal(resp, &node); err != nil {
+		return nil, fmt.Errorf("unmarshal node response: %w", err)
+	}
+	return &node, nil
+}
+
+// ListNodeNodes calls GET /control/v1/node to list all nodes.
+func (c *SCClient) ListNodeNodes(ctx context.Context, clusterName, namespace string) ([]NodeDescribeResponse, error) {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/control/v1/node", baseURL)
+
+	resp, err := c.doRequestGet(ctx, namespace, clusterName, url)
+	if err != nil {
+		return nil, fmt.Errorf("list nodes: %w", err)
+	}
+
+	var result NodeListResponse
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal node list response: %w", err)
+	}
+	return result.Nodes, nil
+}
+
+// GetNodeShards calls GET /control/v1/node/:node_id/shards to list shards on a node.
+func (c *SCClient) GetNodeShards(ctx context.Context, clusterName, namespace string, nodeID uint64) ([]ShardDescribeResponse, error) {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/control/v1/node/%d/shards", baseURL, nodeID)
+
+	resp, err := c.doRequestGet(ctx, namespace, clusterName, url)
+	if err != nil {
+		return nil, fmt.Errorf("get node shards: %w", err)
+	}
+
+	var result NodeShardsResponse
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal shards response: %w", err)
+	}
+	return result.Shards, nil
+}
+
+// ConfigureNode calls PUT /control/v1/node/:node_id/config to change availability
+// and/or scheduling policy. Pass nil for fields that should not be changed.
+func (c *SCClient) ConfigureNode(ctx context.Context, clusterName, namespace string, nodeID uint64, availability, scheduling *string) error {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/control/v1/node/%d/config", baseURL, nodeID)
+
+	body := nodeConfigRequest{
+		Availability: availability,
+		Scheduling:   scheduling,
+	}
+
+	return c.doRequest(ctx, namespace, clusterName, http.MethodPut, url, body)
+}
+
+// StartNodeDrain calls PUT /control/v1/node/:node_id/drain to start draining
+// a node (migrate its attached shards to other nodes).
+func (c *SCClient) StartNodeDrain(ctx context.Context, clusterName, namespace string, nodeID uint64) error {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/control/v1/node/%d/drain", baseURL, nodeID)
+
+	return c.doRequest(ctx, namespace, clusterName, http.MethodPut, url, nil)
+}
+
+// CancelNodeDrain calls DELETE /control/v1/node/:node_id/drain to cancel
+// an ongoing drain operation.
+func (c *SCClient) CancelNodeDrain(ctx context.Context, clusterName, namespace string, nodeID uint64) error {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/control/v1/node/%d/drain", baseURL, nodeID)
+
+	return c.doRequest(ctx, namespace, clusterName, http.MethodDelete, url, nil)
+}
+
+// StartNodeFill calls PUT /control/v1/node/:node_id/fill to set a node to
+// Filling mode (only receives new shard placements, not existing shards).
+func (c *SCClient) StartNodeFill(ctx context.Context, clusterName, namespace string, nodeID uint64) error {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/control/v1/node/%d/fill", baseURL, nodeID)
+
+	return c.doRequest(ctx, namespace, clusterName, http.MethodPut, url, nil)
+}
+
+// CancelNodeFill calls DELETE /control/v1/node/:node_id/fill to cancel
+// Filling mode and return to Active.
+func (c *SCClient) CancelNodeFill(ctx context.Context, clusterName, namespace string, nodeID uint64) error {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/control/v1/node/%d/fill", baseURL, nodeID)
+
+	return c.doRequest(ctx, namespace, clusterName, http.MethodDelete, url, nil)
+}
+
+// StartNodeDelete calls PUT /control/v1/node/:node_id/delete to mark a node
+// for deletion. If force is true, the node will be deleted without drain.
+func (c *SCClient) StartNodeDelete(ctx context.Context, clusterName, namespace string, nodeID uint64, force bool) error {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/control/v1/node/%d/delete?force=%t", baseURL, nodeID, force)
+
+	return c.doRequest(ctx, namespace, clusterName, http.MethodPut, url, nil)
+}
+
+// CancelNodeDelete calls DELETE /control/v1/node/:node_id/delete to cancel
+// an ongoing node deletion.
+func (c *SCClient) CancelNodeDelete(ctx context.Context, clusterName, namespace string, nodeID uint64) error {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/control/v1/node/%d/delete", baseURL, nodeID)
+
+	return c.doRequest(ctx, namespace, clusterName, http.MethodDelete, url, nil)
+}
+
+// doRequestGet sends an authenticated GET request and returns the response body.
+func (c *SCClient) doRequestGet(ctx context.Context, namespace, clusterName, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create HTTP request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	if !c.SkipAuth {
+		token, err := c.generateJWT(ctx, clusterName, namespace)
+		if err != nil {
+			return nil, fmt.Errorf("generate JWT token: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("storage controller request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read response body: %w", err)
+	}
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return respBody, nil
+	}
+
+	return nil, fmt.Errorf("storage controller returned %d: %s", resp.StatusCode, string(respBody))
+}
+
 // getNodeAvailabilityZone reads the K8s node topology label to determine
 // the availability zone for the safekeeper's pod.
 //

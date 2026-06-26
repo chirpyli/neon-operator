@@ -35,6 +35,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
+	pageserverspec "oltp.molnett.org/neon-operator/specs/pageserver"
 	safekeeperspec "oltp.molnett.org/neon-operator/specs/safekeeper"
 	"oltp.molnett.org/neon-operator/specs/storagebroker"
 	"oltp.molnett.org/neon-operator/specs/storagecontroller"
@@ -55,6 +56,8 @@ type ClusterReconciler struct {
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=clusters/finalizers,verbs=update
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=safekeepers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=safekeepers/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=pageservers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=pageservers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=projects,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=projects/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=projects/finalizers,verbs=update
@@ -140,6 +143,9 @@ func (r *ClusterReconciler) updateStatus(ctx context.Context, cluster *neonv1alp
 	skReady, skTotal := r.safekeeperState(ctx, cluster)
 	quorumRequired := int(cluster.Spec.NumSafekeepers)/2 + 1
 
+	// Aggregate Pageserver status
+	psReady, psTotal := r.pageserverState(ctx, cluster)
+
 	return utils.PatchStatus(ctx, r.Client, cluster, func(c *neonv1alpha1.Cluster) {
 		c.Status.ObservedGeneration = c.Generation
 		conds := &c.Status.Conditions
@@ -162,6 +168,15 @@ func (r *ClusterReconciler) updateStatus(ctx context.Context, cluster *neonv1alp
 		} else {
 			utils.SetCondition(c, conds, utils.ConditionSafekeepersAvailable, metav1.ConditionFalse, utils.ReasonSafekeeperQuorumLost,
 				fmt.Sprintf("%d/%d safekeepers ready (quorum=%d required)", skReady, skTotal, quorumRequired))
+		}
+
+		// Pageserver status
+		if psTotal > 0 && psReady == psTotal {
+			utils.SetCondition(c, conds, utils.ConditionPageserversAvailable, metav1.ConditionTrue, utils.ReasonAsExpected,
+				fmt.Sprintf("%d/%d pageservers ready", psReady, psTotal))
+		} else if psTotal > 0 {
+			utils.SetCondition(c, conds, utils.ConditionPageserversAvailable, metav1.ConditionFalse, utils.ReasonReconciling,
+				fmt.Sprintf("%d/%d pageservers ready", psReady, psTotal))
 		}
 
 		switch {
@@ -192,6 +207,25 @@ func (r *ClusterReconciler) safekeeperState(ctx context.Context, cluster *neonv1
 		}
 	}
 	return ready, len(sks.Items)
+}
+
+// pageserverState returns (ready, total) counts for pageservers belonging to the cluster.
+func (r *ClusterReconciler) pageserverState(ctx context.Context, cluster *neonv1alpha1.Cluster) (int, int) {
+	var pss neonv1alpha1.PageserverList
+	if err := r.List(ctx, &pss,
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels{pageserverspec.ClusterLabel: cluster.Name},
+	); err != nil {
+		return 0, 0
+	}
+
+	ready := 0
+	for _, ps := range pss.Items {
+		if meta.IsStatusConditionTrue(ps.Status.Conditions, utils.ConditionAvailable) {
+			ready++
+		}
+	}
+	return ready, len(pss.Items)
 }
 
 func (r *ClusterReconciler) deploymentState(ctx context.Context, cluster *neonv1alpha1.Cluster, name, label string) (metav1.ConditionStatus, string, string) {
