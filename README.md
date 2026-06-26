@@ -1,155 +1,154 @@
 # Neon Kubernetes Operator
 
-A Kubernetes operator for managing self-hosted [Neon](https://neon.com) Postgres database clusters. This operator enables you to manage all necessary compoents of Neon's control plane on Kubernetes (in cloud and on-premises).
+一个用于管理自托管 [Neon](https://neon.com) Postgres 数据库集群的 Kubernetes Operator。通过该 Operator，您可以在 Kubernetes 上（云端和本地部署）管理 Neon 控制平面所需的所有组件。
 
-*This product isn't affiliated with or endorsed by Neon in any way.*
+*本产品与 Neon 不存在任何关联，亦未以任何方式获得 Neon 的背书。*
 
-## Project Status
+## 项目状态
 
-This operator is functional for development and testing environments. It implements Neon's core architecture components and provides basic cluster management capabilities. We are currently working on Day 1 and Day 2 operations, which means performance is not yet optimized.
+本 Operator 可用于开发和测试环境。它实现了 Neon 的核心架构组件，并提供基本的集群管理能力。目前我们正在推进 Day 1 和 Day 2 运维工作，因此性能尚未优化。
 
-### Limitations vs Hosted Neon
+### 与托管 Neon 的差异
 
-This self-hosted operator currently has several limitations compared to the fully managed Neon service:
+与完整托管版 Neon 服务相比，当前自托管 Operator 存在以下限制：
 
-- **No Compute Auto-scaling**: Compute instances run persistently and do not scale to zero
-- **Manual Tenant Sharding**: Tenant sharding must be configured manually or triggered by specific conditions
-- **Performance Optimization**: Day 2 operations and performance tuning are still in development
-- **Feature Completeness**: Some advanced features available in hosted Neon are not yet implemented
+- **不支持计算自动伸缩（Compute Auto-scaling）**：计算实例持续运行，不会缩容至零
+- **手动租户分片（Tenant Sharding）**：租户分片需手动配置或由特定条件触发
+- **性能优化**：Day 2 运维和性能调优仍在开发中
+- **功能完备性**：托管版 Neon 中的部分高级功能尚未实现
 
-### What's Implemented
+### 已实现的功能
 
-- **Neon Architectural Components**: Pageservers, Safekeepers, Storage Broker, and Storage Controller
-- **Basic Branching**: Create new database branches within projects
-- **Persistent Storage**: Configurable storage for pageservers and safekeepers
-- **E2E Testing**: End-to-end test suite for validating operator functionality
+- **Neon 架构组件**：Pageservers、Safekeepers、Storage Broker 和 Storage Controller
+- **基本分支（Branching）**：在项目（Project）内创建新的数据库分支
+- **持久化存储**：为 Pageserver 和 Safekeeper 提供可配置的存储
+- **端到端测试**：用于验证 Operator 功能的端到端测试套件
 
+### 架构
 
-### Architecture
+本 Operator 实现了 Neon 计算与存储分离的架构：
 
-This operator implements Neon's separation of compute and storage:
+- **Pageservers**：处理来自缓存和对象存储的读取请求
+- **Safekeepers**：提供共识机制和 WAL 持久性保证
+- **Storage Broker**：协调存储操作
+- **Storage Controller**：管理存储集群状态
+- **Compute Nodes（计算节点）**：连接存储层的 PostgreSQL 实例
 
-- **Pageservers**: Handles reads from cache and Object Storage
-- **Safekeepers**: Provide consensus and WAL durability
-- **Storage Broker**: Coordinates storage operations
-- **Storage Controller**: Manages storage cluster state
-- **Compute Nodes**: PostgreSQL instances that connect to storage
+每个组件均以 Kubernetes 工作负载形式运行，并具备持久化存储和服务发现能力。
 
-Each component runs as Kubernetes workloads with persistent storage and service discovery.
+### 未来计划
 
-### What's to come
+#### 功能重构
+- **Notify Hooks**：完全支持 notify-attach 钩子，用于重新配置 Compute 以与其他 Pageserver 通信
 
-#### Functional refactors
-- **Notify Hooks**: Full support for notify-attach hooks which reconfigures Compute to communicate with a different pageserver
+#### Day 2 运维
+- [] Pageserver 退役或故障时自动排空（#21）
+- [] 删除对象时清理关联的租户和 Timeline（#10）
 
-#### Day 2 operations
-- [] Automatically draining Pageservers on retirement or malfunction #21
-- [] Cleaning up tenants and timelines when objects are deleted #10
+#### 性能
+- [] PGBouncer 支持
 
-#### Performance
-- [] PGBouncer support
+## 兼容性
 
-## Compatibility
+本 Operator 已在以下环境中测试通过：
+- **Neon 组件**：Release 9129（始终支持最新版 Compute）
+- **Kubernetes**：1.28+
+- **存储**：需要兼容 S3 的对象存储
 
-This operator is tested with:
-- **Neon Components**: Release 9129 (latest compute always supported)
-- **Kubernetes**: 1.28+
-- **Storage**: S3-compatible object storage required
+## 前置条件
 
-## Prerequisites
+### 必要依赖
 
-### Required Dependencies
+- Go 工具链（1.21 及以上）
+- Kubernetes 集群（1.28+）
+- 已针对集群配置的 kubectl
+- make 命令运行器
+- [Tilt](https://tilt.dev/)（可选，用于本地开发）
+- Docker（用于构建镜像）
 
-- Go toolchain (1.21 or later)
-- Kubernetes cluster (1.28+)
-- kubectl configured for your cluster
-- make command runner
-- [Tilt](https://tilt.dev/) for local development (optional)
-- Docker for building images
+### 存储要求
 
-### Storage Requirements
+- **对象存储**：兼容 S3 的存储（如 AWS S3、Rook/Ceph、MinIO）
+- **持久化卷**：建议使用支持 NVMe 的 PVC 以获得最佳性能
+  - 使用标准存储亦可，但性能将显著下降
+  - 需要支持 512 字节扇区大小
+- **数据库**：用于 Storage Controller 的 PostgreSQL 实例（可使用任意服务商/CNPG）
 
-- **Object Storage**: S3-compatible storage (e.g., AWS S3, Rook/Ceph, MinIO)
-- **Persistent Volumes**: NVMe-supported PVCs recommended for optimal performance
-  - Works with standard storage but performance will be significantly reduced
-  - Requires 512 byte sector size support
-- **Database**: PostgreSQL instance for Storage Controller (can use any provider/CNPG)
+## 开发
 
-## Development
+建议使用单用途 Kind 集群进行本地开发。
 
-A single-purpose Kind cluster is recommended for local development.
+### 基于 Tilt 的本地开发
 
-### Local Development with Tilt
-
-For rapid iteration during development:
+适合开发过程中的快速迭代：
 
 ```bash
-# Start Tilt (rebuilds and redeploys on changes)
+# 启动 Tilt（检测到变更时自动重新构建和部署）
 tilt up
 
-# View Tilt UI
+# 查看 Tilt UI 界面
 tilt up --web
 ```
 
-### Manual Development
+### 手动开发
 
 ```bash
-# Install CRDs
+# 安装 CRD
 make install
 ```
 
-## Testing
+## 测试
 
-### Unit Tests
+### 单元测试
 ```bash
 make test
 ```
 
-### End-to-End Tests
+### 端到端测试
 ```bash
-# Run full E2E test suite (builds image and tests cluster lifecycle)
+# 运行完整端到端测试套件（构建镜像并测试集群生命周期）
 make test-e2e
 
-# Cleanup any leftover test clusters
+# 清理残留的测试集群
 make cleanup-test-e2e
 ```
 
-## Building
+## 构建
 
 ```bash
-# Build manager binary
+# 构建 manager 二进制文件
 make build
 
-# Build Docker image
+# 构建 Docker 镜像
 make docker-build
 ```
 
-## Usage
+## 使用方式
 
-### Installing the Operator
+### 安装 Operator
 
-1. Generate and apply CRDs:
+1. 生成并应用 CRD：
 ```bash
 make install
 ```
 
-2. Deploy the operator:
+2. 部署 Operator：
 ```bash
 make deploy
 ```
 
-### Deployment Flow
+### 部署流程
 
-The correct order for creating resources is:
+创建资源的正确顺序如下：
 
-1. **Install Operator**: Deploy the operator and CRDs
-2. **Create Cluster**: Deploy a NeonCluster resource and wait for all components to become available
-3. **Create Project**: Once the cluster is ready, create NeonProject resources
-4. **Create Branches**: Create NeonBranch resources within projects
+1. **安装 Operator**：部署 Operator 和 CRD
+2. **创建集群（Cluster）**：部署 NeonCluster 资源，等待所有组件就绪
+3. **创建项目（Project）**：集群就绪后，创建 NeonProject 资源
+4. **创建分支（Branch）**：在项目内创建 NeonBranch 资源
 
-**Important**: The entire cluster must be available before projects and branches can be created. Monitor cluster status before proceeding with dependent resources.
+**重要提示**：必须先确保整个集群可用，然后才能创建项目和分支。请在继续创建依赖资源之前监控集群状态。
 
-### Creating a Neon Cluster
+### 创建 Neon 集群
 
 ```yaml
 apiVersion: oltp.molnett.org/v1alpha1
@@ -166,7 +165,7 @@ spec:
       size: "5Gi"
 ```
 
-### Creating a Project
+### 创建项目
 
 ```yaml
 kind: NeonProject
@@ -180,7 +179,7 @@ spec:
   pg_version: "PG17"
 ```
 
-### Creating a Branch
+### 创建分支
 
 ```yaml
 kind: NeonBranch
@@ -194,17 +193,17 @@ spec:
   project_id: neon-project
 ```
 
-## Monitoring
+## 监控
 
-The operator exposes HTTP endpoints on port 8080:
-- `/health` - Health check endpoint
-- `/metrics` - Prometheus metrics (basic)
-- `/` - Diagnostics information
+Operator 在 8080 端口暴露以下 HTTP 端点：
+- `/health` - 健康检查端点
+- `/metrics` - Prometheus 指标（基础）
+- `/` - 诊断信息
 
-## Contributing
+## 贡献
 
-Contributions welcome! Please read the [CONTRIBUTING.md](CONTRIBUTING.md) file for details on how to contribute.
+欢迎贡献！请参阅 [CONTRIBUTING.md](CONTRIBUTING.md) 文件了解如何参与贡献的详细信息。
 
-## License
+## 许可证
 
-Apache License 2.0 - see [LICENSE](LICENSE) file for details.
+Apache License 2.0 - 详见 [LICENSE](LICENSE) 文件。

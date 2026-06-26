@@ -82,3 +82,9 @@ Operator 在 8080 端口上暴露 HTTP 接口：
 获取neon相关的内容，可通过源码进行分析：
 - neon github仓库为：https://github.com/neondatabase/neon.git
 - neon 本地源码为：/home/postgres/works/opensource/neon
+
+进行方案指定以及代码分析时，请不仅考虑neon-operator，还需要考虑neon：/home/postgres/works/opensource/neon
+
+## 其他
+
+代码注释请用中文注释

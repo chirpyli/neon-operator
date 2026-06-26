@@ -144,6 +144,11 @@ spec:
               observedGeneration:
                 format: int64
                 type: integer
+              registeredWithSC:
+                description: |-
+                  RegisteredWithSC indicates whether the safekeeper has been
+                  successfully registered with the Storage Controller via the upsert API.
+                type: boolean
             type: object
         required:
         - spec

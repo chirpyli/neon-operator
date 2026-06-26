@@ -59,11 +59,11 @@ type BranchReconciler struct {
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=branches/finalizers,verbs=update
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=projects,verbs=get;list;watch
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=clusters,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 func (r *BranchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -92,11 +92,12 @@ func (r *BranchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	if !controllerutil.ContainsFinalizer(branch, utils.FinalizerName) {
 		controllerutil.AddFinalizer(branch, utils.FinalizerName)
 		if err := r.Update(ctx, branch); err != nil {
-			log.Error(err, "Failed to add finalizer")
-			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+			log.Error(err, "添加 Finalizer 失败")
+			return ctrl.Result{}, fmt.Errorf("添加 finalizer: %w", err)
 		}
-		log.Info("Finalizer added to Branch, requeuing")
-		return ctrl.Result{Requeue: true}, nil
+		log.Info("Branch Finalizer 已添加，直接继续调和")
+		// 不依赖 Requeue 返回，而是直接 fall-through 继续后续调和逻辑。
+		// 这样可以减少一次不必要的队列往返，提高批量创建场景的调和效率。
 	}
 
 	result, err := r.reconcile(ctx, branch)

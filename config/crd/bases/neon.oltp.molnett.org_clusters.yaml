@@ -68,6 +68,22 @@ spec:
                   Default PostgreSQL version to use if no version is specified in projects.
                   kubebuilder:validation:Enum=14;15;16;17
                 type: integer
+              defaultSafekeeperStorage:
+                description: |-
+                  DefaultSafekeeperStorage defines the default storage config for
+                  auto-created safekeepers. If not set, defaults to Size=10Gi.
+                properties:
+                  size:
+                    description: |-
+                      Size of the PVCs.
+                      kubebuilder:default:=10Gi
+                    type: string
+                  storageClass:
+                    description: Name of the storage class to use for PVCs.
+                    type: string
+                required:
+                - size
+                type: object
               neonImage:
                 default: neondatabase/neon:8463
                 description: The default Neon image to use for all neon-specific resources.

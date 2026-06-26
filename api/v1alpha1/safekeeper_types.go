@@ -53,6 +53,11 @@ type SafekeeperStatus struct {
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// RegisteredWithSC indicates whether the safekeeper has been
+	// successfully registered with the Storage Controller via the upsert API.
+	// +optional
+	RegisteredWithSC bool `json:"registeredWithSC,omitempty"`
 }
 
 // +kubebuilder:object:root=true

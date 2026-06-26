@@ -34,6 +34,7 @@ var _ = Describe("Safekeeper Controller", func() {
 	BeforeEach(func() {
 		storconFake.Reset()
 		storconFake.RegisterSafekeeper = nil
+		storconFake.DecommissionSafekeeper = nil
 
 		namespace = newTestNamespace()
 		Expect(k8sClient.Create(ctx, fixtures.NewBucketCredsSecret(clusterName, namespace))).To(Succeed())
@@ -43,6 +44,7 @@ var _ = Describe("Safekeeper Controller", func() {
 
 	AfterEach(func() {
 		storconFake.RegisterSafekeeper = nil
+		storconFake.DecommissionSafekeeper = nil
 	})
 
 	It("creates StatefulSet and services owned by the Safekeeper CR", func() {
@@ -112,6 +114,53 @@ var _ = Describe("Safekeeper Controller", func() {
 				types.NamespacedName{Name: safekeeperName, Namespace: namespace},
 				&neonv1alpha1.Safekeeper{}))
 		}, 15*time.Second, 200*time.Millisecond).Should(BeTrue(), "Safekeeper should be fully deleted")
+	})
+
+	It("registers safekeeper with Storage Controller and sets RegisteredWithSC", func() {
+		// Wait for safekeeper reconciliation to register with SC.
+		Eventually(func(g Gomega) {
+			sk := &neonv1alpha1.Safekeeper{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: safekeeperName, Namespace: namespace}, sk)).To(Succeed())
+			g.Expect(sk.Status.RegisteredWithSC).To(BeTrue())
+		}, 15*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		// Verify the SC Register endpoint was called.
+		calls := storconFake.Calls()
+		var found bool
+		for _, c := range calls {
+			if c.Method == "POST" && c.Path == "/control/v1/safekeeper/1" {
+				found = true
+				break
+			}
+		}
+		Expect(found).To(BeTrue(), "Expected RegisterSafekeeper call to SC was not made")
+	})
+
+	It("calls DecommissionSafekeeper in Storage Controller on deletion", func() {
+		// Wait for safekeeper to be stable.
+		Eventually(func(g Gomega) {
+			sk := &neonv1alpha1.Safekeeper{}
+			g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: safekeeperName, Namespace: namespace}, sk)).To(Succeed())
+			g.Expect(controllerutil.ContainsFinalizer(sk, utils.FinalizerName)).To(BeTrue())
+		}, 15*time.Second, 200*time.Millisecond).Should(Succeed())
+
+		// Reset calls so we only see the decommission call.
+		storconFake.Reset()
+
+		sk := &neonv1alpha1.Safekeeper{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: safekeeperName, Namespace: namespace}, sk)).To(Succeed())
+		Expect(k8sClient.Delete(ctx, sk)).To(Succeed())
+
+		// Verify DecommissionSafekeeper was called with correct body.
+		Eventually(func() bool {
+			for _, c := range storconFake.Calls() {
+				if c.Method == "POST" && c.Path == "/control/v1/safekeeper/1/scheduling_policy" {
+					return true
+				}
+			}
+			return false
+		}, 10*time.Second, 200*time.Millisecond).Should(BeTrue(),
+			"Expected DecommissionSafekeeper call to SC was not made")
 	})
 
 })

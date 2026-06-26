@@ -73,6 +73,11 @@ type ClusterSpec struct {
 	// Must have a field named "uri"
 	StorageControllerDatabaseSecret *corev1.SecretKeySelector `json:"storageControllerDatabaseSecret"`
 
+	// DefaultSafekeeperStorage defines the default storage config for
+	// auto-created safekeepers. If not set, defaults to Size=10Gi.
+	// +optional
+	DefaultSafekeeperStorage *StorageConfig `json:"defaultSafekeeperStorage,omitempty"`
+
 	// PostgresExposure 控制计算节点 PostgreSQL Service 对外暴露策略。
 	// 不设置时默认为 ClusterIP（仅集群内访问）。
 	// +optional

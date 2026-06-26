@@ -25,6 +25,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -34,6 +35,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
+	safekeeperspec "oltp.molnett.org/neon-operator/specs/safekeeper"
 	"oltp.molnett.org/neon-operator/specs/storagebroker"
 	"oltp.molnett.org/neon-operator/specs/storagecontroller"
 	"oltp.molnett.org/neon-operator/utils"
@@ -51,6 +53,8 @@ type ClusterReconciler struct {
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=clusters,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=clusters/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=clusters/finalizers,verbs=update
+// +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=safekeepers,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=safekeepers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=projects,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=projects/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=projects/finalizers,verbs=update
@@ -89,11 +93,12 @@ func (r *ClusterReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if !controllerutil.ContainsFinalizer(cluster, utils.FinalizerName) {
 		controllerutil.AddFinalizer(cluster, utils.FinalizerName)
 		if err := r.Update(ctx, cluster); err != nil {
-			log.Error(err, "Failed to add finalizer")
-			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+			log.Error(err, "添加 Finalizer 失败")
+			return ctrl.Result{}, fmt.Errorf("添加 finalizer: %w", err)
 		}
-		log.Info("Finalizer added to Cluster, requeuing")
-		return ctrl.Result{Requeue: true}, nil
+		log.Info("Cluster Finalizer 已添加，直接继续调和")
+		// 不依赖 Requeue 返回，而是直接 fall-through 继续后续调和逻辑。
+		// 这样可以减少一次不必要的队列往返，提高批量创建场景的调和效率。
 	}
 
 	result, err := r.reconcile(ctx, cluster)
@@ -131,6 +136,10 @@ func (r *ClusterReconciler) updateStatus(ctx context.Context, cluster *neonv1alp
 	scAvailable, scReason, scMessage := r.deploymentState(ctx, cluster, storagecontroller.Name(cluster.Name), "Storage controller")
 	sbAvailable, sbReason, sbMessage := r.deploymentState(ctx, cluster, storagebroker.Name(cluster.Name), "Storage broker")
 
+	// Aggregate Safekeeper status
+	skReady, skTotal := r.safekeeperState(ctx, cluster)
+	quorumRequired := int(cluster.Spec.NumSafekeepers)/2 + 1
+
 	return utils.PatchStatus(ctx, r.Client, cluster, func(c *neonv1alpha1.Cluster) {
 		c.Status.ObservedGeneration = c.Generation
 		conds := &c.Status.Conditions
@@ -146,6 +155,15 @@ func (r *ClusterReconciler) updateStatus(ctx context.Context, cluster *neonv1alp
 		utils.SetCondition(c, conds, utils.ConditionStorageControllerAvailable, scAvailable, scReason, scMessage)
 		utils.SetCondition(c, conds, utils.ConditionStorageBrokerAvailable, sbAvailable, sbReason, sbMessage)
 
+		// Safekeeper quorum status
+		if skReady >= quorumRequired {
+			utils.SetCondition(c, conds, utils.ConditionSafekeepersAvailable, metav1.ConditionTrue, utils.ReasonAsExpected,
+				fmt.Sprintf("%d/%d safekeepers ready (quorum=%d)", skReady, skTotal, quorumRequired))
+		} else {
+			utils.SetCondition(c, conds, utils.ConditionSafekeepersAvailable, metav1.ConditionFalse, utils.ReasonSafekeeperQuorumLost,
+				fmt.Sprintf("%d/%d safekeepers ready (quorum=%d required)", skReady, skTotal, quorumRequired))
+		}
+
 		switch {
 		case scAvailable == metav1.ConditionTrue && sbAvailable == metav1.ConditionTrue:
 			utils.SetCondition(c, conds, utils.ConditionAvailable, metav1.ConditionTrue, utils.ReasonAsExpected, "Cluster components are Available")
@@ -155,6 +173,25 @@ func (r *ClusterReconciler) updateStatus(ctx context.Context, cluster *neonv1alp
 			utils.SetCondition(c, conds, utils.ConditionProgressing, metav1.ConditionTrue, utils.ReasonReconciling, "Waiting for child Deployments to become Available")
 		}
 	})
+}
+
+// safekeeperState returns (ready, total) counts for safekeepers belonging to the cluster.
+func (r *ClusterReconciler) safekeeperState(ctx context.Context, cluster *neonv1alpha1.Cluster) (int, int) {
+	var sks neonv1alpha1.SafekeeperList
+	if err := r.List(ctx, &sks,
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels{safekeeperspec.ClusterLabel: cluster.Name},
+	); err != nil {
+		return 0, 0
+	}
+
+	ready := 0
+	for _, sk := range sks.Items {
+		if meta.IsStatusConditionTrue(sk.Status.Conditions, utils.ConditionAvailable) {
+			ready++
+		}
+	}
+	return ready, len(sks.Items)
 }
 
 func (r *ClusterReconciler) deploymentState(ctx context.Context, cluster *neonv1alpha1.Cluster, name, label string) (metav1.ConditionStatus, string, string) {

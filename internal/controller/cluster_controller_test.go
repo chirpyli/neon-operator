@@ -25,8 +25,10 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
+	safekeeperspec "oltp.molnett.org/neon-operator/specs/safekeeper"
 	"oltp.molnett.org/neon-operator/test/fixtures"
 )
 
@@ -69,6 +71,29 @@ var _ = Describe("Cluster Controller", func() {
 				Name:      clusterName + "-storage-broker",
 				Namespace: namespace,
 			}, broker)).To(Succeed())
+		}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
+	})
+
+	It("auto-creates Safekeeper CRs according to NumSafekeepers", func() {
+		// The fixture creates a Cluster with NumSafekeepers=3.
+		// Expect IDs 1, 2, 3 to be created.
+		Eventually(func(g Gomega) {
+			var list neonv1alpha1.SafekeeperList
+			g.Expect(k8sClient.List(ctx, &list,
+				client.InNamespace(namespace),
+				client.MatchingLabels{
+					safekeeperspec.ClusterLabel: clusterName,
+				},
+			)).To(Succeed())
+			g.Expect(list.Items).To(HaveLen(3))
+			ids := make(map[uint32]bool)
+			for _, sk := range list.Items {
+				ids[sk.Spec.ID] = true
+				g.Expect(sk.Spec.Cluster).To(Equal(clusterName))
+			}
+			g.Expect(ids).To(HaveKey(uint32(1)))
+			g.Expect(ids).To(HaveKey(uint32(2)))
+			g.Expect(ids).To(HaveKey(uint32(3)))
 		}, 10*time.Second, 200*time.Millisecond).Should(Succeed())
 	})
 })

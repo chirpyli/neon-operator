@@ -112,10 +112,13 @@ var _ = BeforeSuite(func() {
 		Scheme: mgr.GetScheme(),
 	}).SetupWithManager(mgr)).To(Succeed())
 
+	scClient := NewSCClient(mgr.GetClient(), nil, storconFake.URL())
+	scClient.SkipAuth = true
+
 	Expect((&SafekeeperReconciler{
-		Client:                   mgr.GetClient(),
-		Scheme:                   mgr.GetScheme(),
-		StorageControllerBaseURL: storconFake.URL(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		SCClient: scClient,
 	}).SetupWithManager(mgr)).To(Succeed())
 	// +kubebuilder:scaffold:builder
 

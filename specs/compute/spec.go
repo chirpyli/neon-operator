@@ -453,7 +453,7 @@ func GenerateComputeSpec(
 				Name:      project.Name,
 				Roles: []Role{
 					{
-						Name:              "postgres",     // 默认密码postgres
+						Name:              "postgres", // 默认密码postgres
 						EncryptedPassword: "SCRAM-SHA-256$4096:159kANhgWW13pz78P02IMQ==$grA4JzZPeRmUeV8VjsCzn8QhgdcUZZXXPyUf3vyZZV4=:XgEolgh2F/C2yTbY16t856WqifqPlQsRnCUU4Q7BLVM=",
 						Options:           nil,
 					},

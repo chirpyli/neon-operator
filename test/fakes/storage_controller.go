@@ -30,6 +30,9 @@ type StorageController struct {
 	// RegisterSafekeeper 覆盖 POST /control/v1/safekeeper/{id} 的默认 200 处理函数，非 nil 时生效。
 	RegisterSafekeeper http.HandlerFunc
 
+	// DecommissionSafekeeper 覆盖 POST /control/v1/safekeeper/{id}/scheduling_policy 的默认 200 处理函数，非 nil 时生效。
+	DecommissionSafekeeper http.HandlerFunc
+
 	mu    sync.Mutex
 	calls []Call
 }
@@ -60,6 +63,9 @@ func NewStorageController() *StorageController {
 	})
 	mux.HandleFunc("POST /control/v1/safekeeper/{id}", func(w http.ResponseWriter, r *http.Request) {
 		sc.dispatch(w, r, sc.RegisterSafekeeper, http.StatusOK)
+	})
+	mux.HandleFunc("POST /control/v1/safekeeper/{id}/scheduling_policy", func(w http.ResponseWriter, r *http.Request) {
+		sc.dispatch(w, r, sc.DecommissionSafekeeper, http.StatusOK)
 	})
 	sc.server = httptest.NewServer(mux)
 	return sc

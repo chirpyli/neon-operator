@@ -194,6 +194,11 @@ func (in *ClusterSpec) DeepCopyInto(out *ClusterSpec) {
 		*out = new(corev1.SecretKeySelector)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.DefaultSafekeeperStorage != nil {
+		in, out := &in.DefaultSafekeeperStorage, &out.DefaultSafekeeperStorage
+		*out = new(StorageConfig)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.PostgresExposure != nil {
 		in, out := &in.PostgresExposure, &out.PostgresExposure
 		*out = new(ServiceExposure)

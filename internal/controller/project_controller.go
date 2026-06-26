@@ -86,11 +86,12 @@ func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	if !controllerutil.ContainsFinalizer(project, utils.FinalizerName) {
 		controllerutil.AddFinalizer(project, utils.FinalizerName)
 		if err := r.Update(ctx, project); err != nil {
-			log.Error(err, "Failed to add finalizer")
-			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+			log.Error(err, "添加 Finalizer 失败")
+			return ctrl.Result{}, fmt.Errorf("添加 finalizer: %w", err)
 		}
-		log.Info("Finalizer added to Project, requeuing")
-		return ctrl.Result{Requeue: true}, nil
+		log.Info("Project Finalizer 已添加，直接继续调和")
+		// 不依赖 Requeue 返回，而是直接 fall-through 继续后续调和逻辑。
+		// 这样可以减少一次不必要的队列往返，提高批量创建场景的调和效率。
 	}
 
 	result, err := r.reconcile(ctx, project)

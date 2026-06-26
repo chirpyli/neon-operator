@@ -20,15 +20,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
 	safekeeperspec "oltp.molnett.org/neon-operator/specs/safekeeper"
@@ -37,23 +42,29 @@ import (
 
 type SafekeeperReconciler struct {
 	client.Client
-	Scheme                   *runtime.Scheme
-	StorageControllerBaseURL string
+	Scheme *runtime.Scheme
+	// SCClient 用于与 Storage Controller 的管理 API 通信，
+	// 负责 JWT 认证和重定向跟随。
+	SCClient *SCClient
 }
 
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=safekeepers,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=safekeepers/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=safekeepers/finalizers,verbs=update
+// +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=clusters,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=statefulsets,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get
 // +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update;patch;delete
 
 func (r *SafekeeperReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
-	log.Info("Reconcile loop start", "request", req)
+	log.Info("调和循环开始", "request", req)
 	defer func() {
-		log.Info("Reconcile loop end", "request", req)
+		log.Info("调和循环结束", "request", req)
 	}()
 
 	safekeeper, err := r.getSafekeeper(ctx, req)
@@ -66,7 +77,7 @@ func (r *SafekeeperReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 
 	ctx = context.WithValue(ctx, utils.SafekeeperNameKey, safekeeper.Name)
 
-	// === 删除路径：执行外部资源清理 ===
+	// === 删除路径：先在 SC 中标记 Decomissioned，再移除 Finalizer ===
 	if !safekeeper.DeletionTimestamp.IsZero() {
 		return r.finalize(ctx, safekeeper)
 	}
@@ -75,11 +86,12 @@ func (r *SafekeeperReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	if !controllerutil.ContainsFinalizer(safekeeper, utils.FinalizerName) {
 		controllerutil.AddFinalizer(safekeeper, utils.FinalizerName)
 		if err := r.Update(ctx, safekeeper); err != nil {
-			log.Error(err, "Failed to add finalizer")
-			return ctrl.Result{}, fmt.Errorf("add finalizer: %w", err)
+			log.Error(err, "添加 Finalizer 失败")
+			return ctrl.Result{}, fmt.Errorf("添加 finalizer: %w", err)
 		}
-		log.Info("Finalizer added to Safekeeper, requeuing")
-		return ctrl.Result{Requeue: true}, nil
+		log.Info("Safekeeper Finalizer 已添加，直接继续调和")
+		// 不依赖 Requeue 返回，而是直接 fall-through 继续后续调和逻辑。
+		// 这样可以减少一次不必要的队列往返，提高批量创建场景的调和效率。
 	}
 
 	result, err := r.reconcile(ctx, safekeeper)
@@ -98,11 +110,11 @@ func (r *SafekeeperReconciler) getSafekeeper(ctx context.Context, req ctrl.Reque
 	safekeeper := &neonv1alpha1.Safekeeper{}
 	if err := r.Get(ctx, req.NamespacedName, safekeeper); err != nil {
 		if apierrors.IsNotFound(err) {
-			log.Info("Safekeeper has been deleted")
+			log.Info("Safekeeper 已被删除")
 			return nil, nil
 		}
 
-		return nil, fmt.Errorf("cannot get the resource: %w", err)
+		return nil, fmt.Errorf("无法获取资源: %w", err)
 	}
 	return safekeeper, nil
 }
@@ -113,29 +125,38 @@ func (r *SafekeeperReconciler) reconcile(ctx context.Context, safekeeper *neonv1
 
 	createErr := r.createSafekeeperResources(ctx, safekeeper)
 	if createErr != nil {
-		log.Error(createErr, "error while creating safekeeper resources")
+		log.Error(createErr, "创建 safekeeper 资源时出错")
 	}
 
 	stsName := safekeeperspec.Name(safekeeper)
 	if err := utils.UpdateSTSBackedStatus(ctx, r.Client, safekeeper, stsName, "Safekeeper", createErr); err != nil {
-		log.Error(err, "failed to update safekeeper status")
+		log.Error(err, "更新 safekeeper 状态失败")
 		return ctrl.Result{}, err
 	}
 
 	if createErr != nil {
-		return ctrl.Result{}, fmt.Errorf("not able to create safekeeper resources: %w", createErr)
+		return ctrl.Result{}, fmt.Errorf("无法创建 safekeeper 资源: %w", createErr)
 	}
+
+	// 向 Storage Controller 注册 safekeeper 失败时，accelerated requeue，
+	// 而不是等待下一次 cache resync（默认 5 分钟）。
+	// SC 注册是创建流程的最后一步；如果此处为 false，说明刚刚的
+	// createSafekeeperResources 中 RegisterSafekeeper 返回了错误。
+	if !safekeeper.Status.RegisteredWithSC {
+		log.Info("Storage Controller 注册待重试", "safekeeper", safekeeper.Name)
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
 // finalize 处理 Safekeeper 的删除逻辑。
 //
-// 当前实现直接移除 Finalizer，不向 Storage Controller 发送注销请求。
+// 在移除 Finalizer 之前，向 Storage Controller 发送 Decomissioned 调度策略请求。
+// SC 会停止该 safekeeper 的 reconciler 和心跳监控，将其从调度中移除。
 //
-// TODO: 从 Storage Controller 注销 safekeeper 的逻辑待后续实现。
-// Neon 的 Storage Controller 目前没有 safekeeper 的 DELETE 端点，
-// 且 safekeeper 删除涉及数据迁移等问题，不可简单注销。
-// 详见 docs/design/safekeeper-deletion.md
+// 如果 SC 不可达，仅记录日志警告，不阻塞删除——SC 会通过心跳超时
+// 自行检测 safekeeper 消失。
 func (r *SafekeeperReconciler) finalize(ctx context.Context, sk *neonv1alpha1.Safekeeper) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -143,16 +164,24 @@ func (r *SafekeeperReconciler) finalize(ctx context.Context, sk *neonv1alpha1.Sa
 		return ctrl.Result{}, nil
 	}
 
-	log.Info("Finalizing Safekeeper deletion (Storage Controller deregistration not yet implemented)",
+	log.Info("正在终止 Safekeeper 删除，向 Storage Controller 发送 Decomissioned 请求",
 		"safekeeper", sk.Name, "id", sk.Spec.ID)
 
-	controllerutil.RemoveFinalizer(sk, utils.FinalizerName)
-	if err := r.Update(ctx, sk); err != nil {
-		log.Error(err, "Failed to remove finalizer")
-		return ctrl.Result{}, fmt.Errorf("remove finalizer: %w", err)
+	// 步骤1：在 SC 中标记 Decomissioned（尽力而为）
+	if err := r.SCClient.DecommissionSafekeeper(ctx, sk); err != nil {
+		// SC 不可达不是致命错误——它会通过心跳超时自行检测
+		log.Info("SC Decommission 失败，继续删除流程",
+			"error", err, "id", sk.Spec.ID)
 	}
 
-	log.Info("Finalizer removed, Safekeeper will be deleted by APIServer",
+	// 步骤2：移除 Finalizer，允许 K8s 删除资源
+	controllerutil.RemoveFinalizer(sk, utils.FinalizerName)
+	if err := r.Update(ctx, sk); err != nil {
+		log.Error(err, "移除 Finalizer 失败")
+		return ctrl.Result{}, fmt.Errorf("移除 finalizer: %w", err)
+	}
+
+	log.Info("Finalizer 已移除，Safekeeper 将由 APIServer 删除",
 		"safekeeper", sk.Name)
 	return ctrl.Result{}, nil
 }
@@ -160,8 +189,44 @@ func (r *SafekeeperReconciler) finalize(ctx context.Context, sk *neonv1alpha1.Sa
 func (r *SafekeeperReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&neonv1alpha1.Safekeeper{}).
+		// 监听 Cluster 变化，将属于该 Cluster 的所有 Safekeeper 加入调和队列。
+		// 作为 For() 的补充触发路径，当 Cluster 状态发生变化（如 numSafekeepers
+		// 变更、Status 更新等）时，确保所有关联 Safekeeper 都能被重新检查。
+		Watches(&neonv1alpha1.Cluster{},
+			handler.EnqueueRequestsFromMapFunc(r.mapClusterToSafekeepers)).
 		Owns(&appsv1.StatefulSet{}).
 		Owns(&corev1.Service{}).
+		Owns(&policyv1.PodDisruptionBudget{}).
 		Named("safekeeper").
 		Complete(r)
+}
+
+// mapClusterToSafekeepers 列出属于指定 Cluster 的所有 Safekeeper CR，
+// 并将其加入调和队列。使用标准缓存 client，与 Informer 共享同一缓存。
+func (r *SafekeeperReconciler) mapClusterToSafekeepers(ctx context.Context, obj client.Object) []reconcile.Request {
+	cluster, ok := obj.(*neonv1alpha1.Cluster)
+	if !ok {
+		return nil
+	}
+
+	var safekeepers neonv1alpha1.SafekeeperList
+	if err := r.List(ctx, &safekeepers,
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels{
+			safekeeperspec.ClusterLabel: cluster.Name,
+		},
+	); err != nil {
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(safekeepers.Items))
+	for _, sk := range safekeepers.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: types.NamespacedName{
+				Namespace: sk.Namespace,
+				Name:      sk.Name,
+			},
+		})
+	}
+	return requests
 }

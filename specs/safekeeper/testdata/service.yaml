@@ -3,8 +3,10 @@ kind: Service
 metadata:
   creationTimestamp: null
   labels:
+    app.kubernetes.io/component: safekeeper
+    app.kubernetes.io/name: safekeeper
+    app.kubernetes.io/part-of: neon
     molnett.org/cluster: test-cluster
-    molnett.org/component: safekeeper
     molnett.org/safekeeper: test-safekeeper
   name: test-cluster-safekeeper-1
   namespace: neon
