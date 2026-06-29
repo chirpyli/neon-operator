@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -38,6 +39,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
+	safekeeperspec "oltp.molnett.org/neon-operator/specs/safekeeper"
 	"oltp.molnett.org/neon-operator/specs/storagecontroller"
 	"oltp.molnett.org/neon-operator/utils"
 )
@@ -57,6 +59,7 @@ type ProjectReconciler struct {
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=projects,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=projects/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=projects/finalizers,verbs=update
+// +kubebuilder:rbac:groups="",resources=pods,verbs=list
 
 func (r *ProjectReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -310,6 +313,12 @@ func (r *ProjectReconciler) finalize(ctx context.Context, project *neonv1alpha1.
 	log.Info("已从 Storage Controller 删除 tenant",
 		"project", project.Name, "tenantID", project.Spec.TenantID)
 
+	// 直接调用每个 safekeeper 的 DELETE /v1/tenant/{tenantID} 清理 WAL 数据。
+	// Storage Controller 的 safekeeper reconciler 是异步的，可能在 SC 被删除前
+	// 未完成执行，导致孤儿 WAL 数据残留。这里直接同步调用 safekeeper API 确保清理。
+	// 清理失败不阻塞 finalizer 移除——SC reconciler 作为兜底。
+	r.cleanupSafekeeperTenant(ctx, project.Spec.ClusterName, project.Namespace, project.Spec.TenantID)
+
 	return r.removeFinalizer(ctx, project)
 }
 
@@ -350,6 +359,72 @@ func (r *ProjectReconciler) deleteTenant(ctx context.Context, clusterName, tenan
 	}
 
 	return fmt.Errorf("storage controller 返回状态码 %d", resp.StatusCode)
+}
+
+const safekeeperHTTPPort = 7676
+
+// cleanupSafekeeperTenant 向集群中所有 safekeeper 发送 DELETE /v1/tenant/{tenantID}
+// 请求，清理该 tenant 的所有 WAL 数据。此为尽力而为操作，失败仅记录日志，不阻塞删除流程。
+//
+// 背景：Storage Controller 的 tenant_delete 使用异步 reconciler 机制删除 safekeeper 数据，
+// SC 返回 200 时 safekeeper 数据尚未被实际清理。如果 SC 在 reconciler 执行前被删除，
+// safekeeper 上的 WAL 数据将成为孤儿。这里直接调用 safekeeper HTTP API 作为确定性清理路径。
+func (r *ProjectReconciler) cleanupSafekeeperTenant(ctx context.Context, clusterName, namespace, tenantID string) {
+	log := logf.FromContext(ctx)
+
+	var pods corev1.PodList
+	if err := r.List(ctx, &pods,
+		client.InNamespace(namespace),
+		client.MatchingLabels{
+			"app.kubernetes.io/component": "safekeeper",
+			safekeeperspec.ClusterLabel:   clusterName,
+		},
+	); err != nil {
+		log.Info("无法列出 safekeeper pod，跳过 WAL 清理",
+			"cluster", clusterName, "error", err)
+		return
+	}
+
+	if len(pods.Items) == 0 {
+		log.Info("未找到 safekeeper pod，跳过 WAL 清理",
+			"cluster", clusterName)
+		return
+	}
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	deleteURLFmt := "http://%s:%d/v1/tenant/%s"
+
+	for _, pod := range pods.Items {
+		if pod.Status.PodIP == "" {
+			log.Info("safekeeper pod 尚未分配 IP，跳过",
+				"pod", pod.Name)
+			continue
+		}
+
+		url := fmt.Sprintf(deleteURLFmt, pod.Status.PodIP, safekeeperHTTPPort, tenantID)
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
+		if err != nil {
+			log.Info("创建 safekeeper 清理请求失败", "url", url, "error", err)
+			continue
+		}
+
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			log.Info("safekeeper WAL 清理请求失败（非致命）",
+				"pod", pod.Name, "url", url, "error", err)
+			continue
+		}
+
+		// 200: 删除成功, 404: 已不存在（幂等）
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
+			log.Info("safekeeper WAL 已清理",
+				"pod", pod.Name, "tenantID", tenantID, "status", resp.StatusCode)
+		} else {
+			log.Info("safekeeper 返回非预期状态码",
+				"pod", pod.Name, "status", resp.StatusCode, "url", url)
+		}
+		resp.Body.Close()
+	}
 }
 
 // removeFinalizer 从 Project 中移除 Finalizer，允许 Kubernetes 完成删除。

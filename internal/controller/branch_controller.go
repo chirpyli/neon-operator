@@ -25,8 +25,6 @@ import (
 	"net/http"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -59,11 +57,6 @@ type BranchReconciler struct {
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=branches/finalizers,verbs=update
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=projects,verbs=get;list;watch
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=clusters,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch
-// +kubebuilder:rbac:groups="",resources=services,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 
 func (r *BranchReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
@@ -141,20 +134,14 @@ func (r *BranchReconciler) reconcile(ctx context.Context, branch *neonv1alpha1.B
 		return ctrl.Result{}, err
 	}
 
+	// Branch is just a timeline container — compute is provided by Endpoints.
+	// Per Neon design, branches do not have built-in compute nodes.
 	timelineErr := r.ensureTimeline(ctx, branch, project)
 	if timelineErr != nil {
 		log.Error(timelineErr, "failed to ensure timeline")
 	}
 
-	var createErr error
-	if timelineErr == nil {
-		createErr = r.createBranchResources(ctx, branch, project)
-		if createErr != nil {
-			log.Error(createErr, "error while creating branch resources")
-		}
-	}
-
-	if statusErr := r.updateStatus(ctx, branch, timelineErr, createErr); statusErr != nil {
+	if statusErr := r.updateStatus(ctx, branch, timelineErr); statusErr != nil {
 		log.Error(statusErr, "failed to update branch status")
 		return ctrl.Result{}, statusErr
 	}
@@ -162,17 +149,10 @@ func (r *BranchReconciler) reconcile(ctx context.Context, branch *neonv1alpha1.B
 	if timelineErr != nil {
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
-	if createErr != nil {
-		return ctrl.Result{}, fmt.Errorf("not able to create branch resources: %w", createErr)
-	}
 	return ctrl.Result{}, nil
 }
 
-func (r *BranchReconciler) updateStatus(ctx context.Context, branch *neonv1alpha1.Branch, timelineErr, createErr error) error {
-	deploymentName := fmt.Sprintf("%s-compute-node", branch.Name)
-	dep := &appsv1.Deployment{}
-	depErr := r.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: branch.Namespace}, dep)
-
+func (r *BranchReconciler) updateStatus(ctx context.Context, branch *neonv1alpha1.Branch, timelineErr error) error {
 	return utils.PatchStatus(ctx, r.Client, branch, func(b *neonv1alpha1.Branch) {
 		b.Status.ObservedGeneration = b.Generation
 		conds := &b.Status.Conditions
@@ -185,37 +165,14 @@ func (r *BranchReconciler) updateStatus(ctx context.Context, branch *neonv1alpha
 
 		if timelineErr != nil {
 			utils.SetCondition(b, conds, utils.ConditionTimelineCreated, metav1.ConditionFalse, utils.ReasonTimelineCreationFailed, timelineErr.Error())
+			utils.SetCondition(b, conds, utils.ConditionAvailable, metav1.ConditionFalse, utils.ReasonTimelineCreationFailed, timelineErr.Error())
+			utils.SetCondition(b, conds, utils.ConditionProgressing, metav1.ConditionTrue, utils.ReasonReconciling, "Working toward desired state")
 		} else {
 			utils.SetCondition(b, conds, utils.ConditionTimelineCreated, metav1.ConditionTrue, utils.ReasonAsExpected, "Timeline created on storage controller")
-		}
-
-		computeReady := metav1.ConditionFalse
-		computeReason := utils.ReasonChildDeploymentNotAvailable
-		computeMessage := "Compute Deployment is not Available yet"
-		switch {
-		case createErr != nil:
-			computeReason = utils.ReasonResourceCreateFailed
-			computeMessage = createErr.Error()
-		case apierrors.IsNotFound(depErr):
-			computeReason = utils.ReasonChildResourceMissing
-			computeMessage = "Compute Deployment has not been observed yet"
-		case depErr != nil:
-			computeReady = metav1.ConditionUnknown
-			computeReason = utils.ReasonChildResourceMissing
-			computeMessage = depErr.Error()
-		case utils.IsDeploymentAvailable(dep):
-			computeReady = metav1.ConditionTrue
-			computeReason = utils.ReasonAsExpected
-			computeMessage = "Compute Deployment is Available"
-		}
-		utils.SetCondition(b, conds, utils.ConditionComputeReady, computeReady, computeReason, computeMessage)
-
-		if timelineErr == nil && computeReady == metav1.ConditionTrue {
-			utils.SetCondition(b, conds, utils.ConditionAvailable, metav1.ConditionTrue, utils.ReasonAsExpected, "Branch is Available")
+			// Branch is Available when its timeline exists on the storage controller.
+			// Compute access requires a separate Endpoint (read_write or read_only).
+			utils.SetCondition(b, conds, utils.ConditionAvailable, metav1.ConditionTrue, utils.ReasonAsExpected, "Branch timeline is ready")
 			utils.SetCondition(b, conds, utils.ConditionProgressing, metav1.ConditionFalse, utils.ReasonAsExpected, "Branch is at desired state")
-		} else {
-			utils.SetCondition(b, conds, utils.ConditionAvailable, metav1.ConditionFalse, computeReason, computeMessage)
-			utils.SetCondition(b, conds, utils.ConditionProgressing, metav1.ConditionTrue, utils.ReasonReconciling, "Working toward desired state")
 		}
 	})
 }
@@ -254,20 +211,6 @@ func (r *BranchReconciler) getProject(ctx context.Context, projectID string, nam
 	}
 
 	return project, nil
-}
-
-func (r *BranchReconciler) getCluster(ctx context.Context, clusterName, namespace string) (*neonv1alpha1.Cluster, error) {
-	cluster := &neonv1alpha1.Cluster{}
-	namespacedName := types.NamespacedName{
-		Name:      clusterName,
-		Namespace: namespace,
-	}
-
-	if err := r.Get(ctx, namespacedName, cluster); err != nil {
-		return nil, fmt.Errorf("failed to get cluster %s: %w", clusterName, err)
-	}
-
-	return cluster, nil
 }
 
 func (r *BranchReconciler) ensureTimeline(ctx context.Context, branch *neonv1alpha1.Branch, project *neonv1alpha1.Project) error {
@@ -456,8 +399,6 @@ func (r *BranchReconciler) removeFinalizer(ctx context.Context, branch *neonv1al
 	return ctrl.Result{}, nil
 }
 
-// Resource creation functions moved to branch_create.go
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *BranchReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	// exposurePredicate 仅在 Cluster 的 PostgresExposure 变更时触发 Branch reconcile。
@@ -484,9 +425,6 @@ func (r *BranchReconciler) SetupWithManager(mgr ctrl.Manager) error {
 
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&neonv1alpha1.Branch{}).
-		Owns(&appsv1.Deployment{}).
-		Owns(&corev1.Service{}).
-		Owns(&corev1.ConfigMap{}).
 		Watches(&neonv1alpha1.Cluster{},
 			handler.EnqueueRequestsFromMapFunc(r.clusterToBranchRequests),
 			builder.WithPredicates(exposurePredicate),

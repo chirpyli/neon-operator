@@ -21,7 +21,8 @@
 该 Operator 并发运行多个 Controller：
 - **Cluster Controller**：管理 NeonCluster 资源及整体集群状态
 - **Project Controller**：处理 Neon 项目生命周期
-- **Branch Controller**：管理项目内的数据库分支
+- **Branch Controller**：管理项目内的数据库分支（纯 timeline 容器，不创建计算资源）
+- **Endpoint Controller**：管理计算接入点，创建 Compute Deployment/Service/ConfigMap
 
 Controller 位于 `internal/controller/` 目录下，每个 Controller 都实现了 controller-runtime 的 reconciler 模式。
 

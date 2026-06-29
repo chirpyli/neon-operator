@@ -40,7 +40,7 @@ spec:
         - --broker-endpoint=http://test-cluster-storage-broker:50051
         - --listen-pg=0.0.0.0:5454
         - --listen-http=0.0.0.0:7676
-        - --advertise-pg=test-cluster-safekeeper-1.test-cluster-safekeeper-1-headless.neon.svc.cluster.local:5454
+        - --advertise-pg=test-cluster-safekeeper-1-0.test-cluster-safekeeper-1-headless.neon.svc.cluster.local:5454
         - --datadir=/data
         command:
         - /usr/local/bin/safekeeper

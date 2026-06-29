@@ -49,3 +49,39 @@ func (s *Safekeeper) AssignStatusFrom(o client.Object) {
 		s.Status = other.Status
 	}
 }
+
+func (e *Endpoint) StatusValue() any                      { return e.Status }
+func (e *Endpoint) StatusConditions() *[]metav1.Condition { return &e.Status.Conditions }
+func (e *Endpoint) SetObservedGeneration(g int64)         { e.Status.ObservedGeneration = g }
+func (e *Endpoint) AssignStatusFrom(o client.Object) {
+	if other, ok := o.(*Endpoint); ok {
+		e.Status = other.Status
+	}
+}
+
+func (r *Role) StatusValue() any                      { return r.Status }
+func (r *Role) StatusConditions() *[]metav1.Condition { return &r.Status.Conditions }
+func (r *Role) SetObservedGeneration(g int64)         { r.Status.ObservedGeneration = g }
+func (r *Role) AssignStatusFrom(o client.Object) {
+	if other, ok := o.(*Role); ok {
+		r.Status = other.Status
+	}
+}
+
+func (d *Database) StatusValue() any                      { return d.Status }
+func (d *Database) StatusConditions() *[]metav1.Condition { return &d.Status.Conditions }
+func (d *Database) SetObservedGeneration(g int64)         { d.Status.ObservedGeneration = g }
+func (d *Database) AssignStatusFrom(o client.Object) {
+	if other, ok := o.(*Database); ok {
+		d.Status = other.Status
+	}
+}
+
+func (o *Operation) StatusValue() any                      { return o.Status }
+func (o *Operation) StatusConditions() *[]metav1.Condition { return &o.Status.Conditions }
+func (o *Operation) SetObservedGeneration(g int64)         { o.Status.ObservedGeneration = g }
+func (o *Operation) AssignStatusFrom(o2 client.Object) {
+	if other, ok := o2.(*Operation); ok {
+		o.Status = other.Status
+	}
+}

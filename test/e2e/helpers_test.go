@@ -39,6 +39,7 @@ const (
 	lifecycleClusterName    = "cluster-e2e"
 	lifecycleProjectName    = "project-e2e"
 	lifecycleBranchName     = "branch-e2e"
+	lifecycleEndpointName   = "endpoint-e2e"
 	lifecyclePageserverName = "pageserver-e2e"
 	lifecyclePageserverID   = uint64(1)
 

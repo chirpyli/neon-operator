@@ -94,9 +94,9 @@ func (c *SCClient) RegisterSafekeeper(ctx context.Context, sk *neonv1alpha1.Safe
 	baseURL := c.baseURL(sk.Spec.Cluster)
 	url := fmt.Sprintf("%s/control/v1/safekeeper/%d", baseURL, sk.Spec.ID)
 
-	// StatefulSet Pod FQDN:
+	// StatefulSet Pod FQDN (STS replica count = 1, ordinal = 0):
 	// {pod-name}.{headless-service}.{namespace}.svc.cluster.local
-	host := fmt.Sprintf("%s.%s.%s.svc.cluster.local",
+	host := fmt.Sprintf("%s-0.%s.%s.svc.cluster.local",
 		safekeeper.Name(sk),
 		safekeeper.HeadlessName(sk),
 		sk.Namespace,

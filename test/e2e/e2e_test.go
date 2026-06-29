@@ -323,6 +323,11 @@ var _ = Describe("Manager", Ordered, func() {
 			Expect(cli.Create(ctx, branch)).To(Succeed())
 			waitForCRAvailable(ctx, cli, branch)
 
+			By("creating read_write Endpoint for Branch")
+			endpoint := fixtures.NewEndpoint(lifecycleEndpointName, namespace, lifecycleBranchName)
+			Expect(cli.Create(ctx, endpoint)).To(Succeed())
+			waitForCRAvailable(ctx, cli, endpoint)
+
 			By("waiting for compute pod readiness")
 			podName := waitForComputePodReady(ctx, cli, namespace, lifecycleBranchName)
 

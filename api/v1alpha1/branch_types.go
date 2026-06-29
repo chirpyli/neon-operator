@@ -34,6 +34,41 @@ type BranchSpec struct {
 
 	// The ID of the Project this Branch belongs to
 	ProjectID string `json:"projectID"`
+
+	// ParentBranch 父分支名称。
+	// 为空表示创建主分支（初始分支），非空表示从已有分支创建子分支。
+	// +optional
+	ParentBranch string `json:"parentBranch,omitempty"`
+
+	// ParentLSN 分支起始 LSN 位点。
+	// 仅在 ParentBranch 非空时有效，用于指定从父分支的哪个 LSN 创建分支。
+	// 格式如 "0/12345678"。
+	// +optional
+	ParentLSN string `json:"parentLSN,omitempty"`
+
+	// ParentTimestamp 时间点分支 (PITR)。
+	// 仅在 ParentBranch 非空时有效，用于指定从父分支的哪个时间点创建分支。
+	// 与 ParentLSN 互斥，优先使用 ParentLSN。
+	// +optional
+	ParentTimestamp string `json:"parentTimestamp,omitempty"`
+
+	// InitSource 初始化源类型。
+	// "parent-data": 从父分支复制全量数据（默认）。
+	// "schema-only": 仅复制 schema，不复制数据。
+	// +optional
+	// +kubebuilder:validation:Enum=parent-data;schema-only
+	// +kubebuilder:default:="parent-data"
+	InitSource string `json:"initSource,omitempty"`
+
+	// Protected 是否为受保护分支。
+	// 受保护分支不能直接删除。
+	// +optional
+	Protected bool `json:"protected,omitempty"`
+
+	// Default 是否为项目的默认分支。
+	// 每个项目只有一个默认分支。默认分支不能删除。
+	// +optional
+	Default bool `json:"default,omitempty"`
 }
 
 // BranchStatus defines the observed state of Branch.

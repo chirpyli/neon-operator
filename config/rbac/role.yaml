@@ -52,8 +52,12 @@ rules:
   resources:
   - branches
   - clusters
+  - databases
+  - endpoints
+  - operations
   - pageservers
   - projects
+  - roles
   - safekeepers
   verbs:
   - create
@@ -68,8 +72,11 @@ rules:
   resources:
   - branches/finalizers
   - clusters/finalizers
+  - databases/finalizers
+  - endpoints/finalizers
   - pageservers/finalizers
   - projects/finalizers
+  - roles/finalizers
   - safekeepers/finalizers
   verbs:
   - update
@@ -78,8 +85,12 @@ rules:
   resources:
   - branches/status
   - clusters/status
+  - databases/status
+  - endpoints/status
+  - operations/status
   - pageservers/status
   - projects/status
+  - roles/status
   - safekeepers/status
   verbs:
   - get

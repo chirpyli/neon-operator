@@ -339,8 +339,16 @@ func GenerateComputeSpec(
 		)
 	}
 
+	// Determine if this compute is read-only based on endpoint type label.
+	// Only read_write endpoints are WAL proposers; read_only endpoints are followers.
+	// If no endpoint-type label is present (e.g. legacy or non-endpoint compute),
+	// default to read-write mode for backward compatibility.
+	endpointType := deployment.GetLabels()["molnett.org/endpoint-type"]
+	readOnly := endpointType == "read_only"
+	log.Info("Compute endpoint type", "type", endpointType, "readOnly", readOnly)
+
 	// 5. Build postgres settings
-	settings := buildPostgresSettings(clusterName, safekeeperIDs, project.Spec.TenantID, branch.Spec.TimelineID)
+	settings := buildPostgresSettings(clusterName, safekeeperIDs, project.Spec.TenantID, branch.Spec.TimelineID, readOnly)
 
 	// 6. Generate spec
 	shards := make(map[string]PageserverShardInfo)
@@ -659,13 +667,13 @@ func getJWTKeysFromSecret(
 	}, nil
 }
 
-func buildPostgresSettings(clusterName string, safekeeperIDs []uint32, tenantID, timelineID string) []SettingsEntry {
+func buildPostgresSettings(clusterName string, safekeeperIDs []uint32, tenantID, timelineID string, readOnly bool) []SettingsEntry {
 	skParts := make([]string, len(safekeeperIDs))
 	for i, id := range safekeeperIDs {
 		skParts[i] = fmt.Sprintf("%s-safekeeper-%d.neon:5454", clusterName, id)
 	}
 
-	return []SettingsEntry{
+	entries := []SettingsEntry{
 		{Name: "fsync", Value: "off", Vartype: "bool"},
 		{Name: "wal_level", Value: "logical", Vartype: "enum"},
 		{Name: "wal_log_hints", Value: "on", Vartype: "bool"},
@@ -680,7 +688,6 @@ func buildPostgresSettings(clusterName string, safekeeperIDs []uint32, tenantID,
 		{Name: "wal_keep_size", Value: "0", Vartype: "integer"},
 		{Name: "password_encryption", Value: "scram-sha-256", Vartype: "enum"},
 		{Name: "restart_after_crash", Value: "off", Vartype: "bool"},
-		{Name: "synchronous_standby_names", Value: "walproposer", Vartype: "string"},
 		{Name: "shared_preload_libraries", Value: "neon", Vartype: "string"},
 		{
 			Name:    "neon.safekeepers",
@@ -691,6 +698,16 @@ func buildPostgresSettings(clusterName string, safekeeperIDs []uint32, tenantID,
 		{Name: "neon.tenant_id", Value: tenantID, Vartype: "string"},
 		{Name: "neon.max_file_cache_size", Value: "1GB", Vartype: "string"},
 	}
+
+	// Only read_write endpoints act as WAL proposers.
+	// Read-only replicas consume WAL but do not participate in proposer election.
+	if !readOnly {
+		entries = append(entries, SettingsEntry{
+			Name: "synchronous_standby_names", Value: "walproposer", Vartype: "string",
+		})
+	}
+
+	return entries
 }
 
 // listSafekeeperIDs 查询集群中所有 Safekeeper CR，提取 spec.id 并按升序排列返回。

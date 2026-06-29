@@ -15,12 +15,16 @@ import (
 const shutdownTimeout = 10 * time.Second
 
 // ControlPlane is a controller-runtime manager.Runnable that serves the
-// HTTP control-plane endpoints (notify-attach, compute spec, health).
+// HTTP control-plane endpoints (notify-attach, compute spec, health)
+// and the Neon-compatible REST API v2.
 type ControlPlane struct {
 	Log            *slog.Logger
 	Client         client.Client
 	BindAddr       string
 	ComputeBaseURL string
+	// Namespace is the Kubernetes namespace where CRDs are managed.
+	// Defaults to "" (all namespaces). Set via WATCH_NAMESPACE env.
+	Namespace string
 }
 
 // Start implements manager.Runnable. The manager invokes it after caches sync
@@ -36,7 +40,7 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 		return fmt.Errorf("controlplane: BindAddr is required")
 	}
 
-	srv := newServer(cp.Log, cp.Client, cp.ComputeBaseURL)
+	srv := newServer(cp.Log, cp.Client, cp.ComputeBaseURL, cp.Namespace)
 	httpServer := &http.Server{
 		Addr:              cp.BindAddr,
 		Handler:           srv,
@@ -61,10 +65,10 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 	}
 }
 
-func newServer(log *slog.Logger, k8sClient client.Client, computeBaseURL string) http.Handler {
+func newServer(log *slog.Logger, k8sClient client.Client, computeBaseURL string, namespace string) http.Handler {
 	mux := http.NewServeMux()
 
-	addRoutes(mux, log, k8sClient, computeBaseURL)
+	addRoutes(mux, log, k8sClient, computeBaseURL, namespace)
 
 	return mux
 }

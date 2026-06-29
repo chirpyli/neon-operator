@@ -58,6 +58,7 @@ func createTestProject() *neonv1alpha1.Project {
 			Namespace: "neon",
 		},
 		Spec: neonv1alpha1.ProjectSpec{
+			Name:        "testProject",
 			ClusterName: "test-cluster",
 			TenantID:    "test-tenant-123",
 		},

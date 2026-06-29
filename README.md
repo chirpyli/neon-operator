@@ -20,7 +20,8 @@
 ### 已实现的功能
 
 - **Neon 架构组件**：Pageservers、Safekeepers、Storage Broker 和 Storage Controller
-- **基本分支（Branching）**：在项目（Project）内创建新的数据库分支
+- **基本分支（Branching）**：在项目（Project）内创建新的数据库分支（纯 timeline），通过 Endpoint 提供计算能力
+- **计算接入点（Endpoint）**：支持 `read_write` 和 `read_only` 两种类型，WAL proposer 自动区分
 - **持久化存储**：为 Pageserver 和 Safekeeper 提供可配置的存储
 - **端到端测试**：用于验证 Operator 功能的端到端测试套件
 
@@ -32,7 +33,9 @@
 - **Safekeepers**：提供共识机制和 WAL 持久性保证
 - **Storage Broker**：协调存储操作
 - **Storage Controller**：管理存储集群状态
-- **Compute Nodes（计算节点）**：连接存储层的 PostgreSQL 实例
+- **Compute Nodes（计算节点）**：连接存储层的 PostgreSQL 实例，基于 WAL proposer 机制，通过 Endpoint CRD 区分 `read_write`/`read_only` 角色
+- **Branch（分支）**：纯 timeline 数据容器，通过 Copy-on-Write 实现零成本分支
+- **Endpoint（计算接入点）**：管理 Compute Pod 的生命周期，是用户实际连接数据库的入口
 
 每个组件均以 Kubernetes 工作负载形式运行，并具备持久化存储和服务发现能力。
 

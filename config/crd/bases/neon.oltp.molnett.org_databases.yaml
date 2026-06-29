@@ -4,22 +4,25 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: branches.neon.oltp.molnett.org
+  name: databases.neon.oltp.molnett.org
 spec:
   group: neon.oltp.molnett.org
   names:
-    kind: Branch
-    listKind: BranchList
-    plural: branches
-    singular: branch
+    kind: Database
+    listKind: DatabaseList
+    plural: databases
+    singular: database
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .status.conditions[?(@.type=="Available")].status
-      name: Available
+    - jsonPath: .spec.branchID
+      name: Branch
       type: string
-    - jsonPath: .status.conditions[?(@.type=="Progressing")].status
-      name: Progressing
+    - jsonPath: .spec.ownerName
+      name: Owner
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
       type: string
     - jsonPath: .metadata.creationTimestamp
       name: Age
@@ -27,7 +30,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: Branch is the Schema for the branches API
+        description: Database is the Schema for the databases API
         properties:
           apiVersion:
             description: |-
@@ -47,67 +50,30 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of Branch
+            description: spec defines the desired state of Database
             properties:
-              default:
-                description: |-
-                  Default 是否为项目的默认分支。
-                  每个项目只有一个默认分支。默认分支不能删除。
-                type: boolean
-              initSource:
-                default: parent-data
-                description: |-
-                  InitSource 初始化源类型。
-                  "parent-data": 从父分支复制全量数据（默认）。
-                  "schema-only": 仅复制 schema，不复制数据。
-                enum:
-                - parent-data
-                - schema-only
+              branchID:
+                description: BranchID 所属分支。
                 type: string
-              parentBranch:
-                description: |-
-                  ParentBranch 父分支名称。
-                  为空表示创建主分支（初始分支），非空表示从已有分支创建子分支。
+              name:
+                description: Name 数据库名。
+                maxLength: 63
+                minLength: 1
                 type: string
-              parentLSN:
+              ownerName:
                 description: |-
-                  ParentLSN 分支起始 LSN 位点。
-                  仅在 ParentBranch 非空时有效，用于指定从父分支的哪个 LSN 创建分支。
-                  格式如 "0/12345678"。
-                type: string
-              parentTimestamp:
-                description: |-
-                  ParentTimestamp 时间点分支 (PITR)。
-                  仅在 ParentBranch 非空时有效，用于指定从父分支的哪个时间点创建分支。
-                  与 ParentLSN 互斥，优先使用 ParentLSN。
-                type: string
-              pgVersion:
-                description: |-
-                  PGVersion specifies the PostgreSQL version to use for the branch.
-                  kubebuilder:validation:Enum=14;15;16;17
-                  kubebuilder:default:=17
-                type: integer
-              projectID:
-                description: The ID of the Project this Branch belongs to
-                type: string
-              protected:
-                description: |-
-                  Protected 是否为受保护分支。
-                  受保护分支不能直接删除。
-                type: boolean
-              timelineID:
-                description: |-
-                  Will be generated unless specified.
-                  Has to be a 32 character alphanumeric string.
+                  OwnerName 拥有者角色名。
+                  未设置时默认为创建该分支的角色。
                 type: string
             required:
-            - pgVersion
-            - projectID
+            - branchID
+            - name
             type: object
           status:
-            description: status defines the observed state of Branch
+            description: status defines the observed state of Database
             properties:
               conditions:
+                description: Conditions 详细状态条件。
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -167,8 +133,12 @@ spec:
                 - type
                 x-kubernetes-list-type: map
               observedGeneration:
+                description: ObservedGeneration 记录最近观察到的 generation。
                 format: int64
                 type: integer
+              phase:
+                description: 'Phase 当前阶段: "active"。'
+                type: string
             type: object
         required:
         - spec

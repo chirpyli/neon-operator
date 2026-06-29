@@ -46,6 +46,7 @@ func NewProject(name, namespace, clusterName string) *neonv1alpha1.Project {
 			Namespace: namespace,
 		},
 		Spec: neonv1alpha1.ProjectSpec{
+			Name:        name,
 			ClusterName: clusterName,
 			PGVersion:   DefaultPGVersion,
 		},
@@ -114,6 +115,19 @@ func NewBucketCredsSecret(clusterName, namespace string) *corev1.Secret {
 			"AWS_REGION":            []byte("us-east-1"),
 			"BUCKET_NAME":           []byte("test-bucket"),
 			"ENDPOINT":              []byte("http://minio.test:9000"),
+		},
+	}
+}
+
+func NewEndpoint(name, namespace, branchID string) *neonv1alpha1.Endpoint {
+	return &neonv1alpha1.Endpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: neonv1alpha1.EndpointSpec{
+			BranchID: branchID,
+			Type:     "read_write",
 		},
 	}
 }

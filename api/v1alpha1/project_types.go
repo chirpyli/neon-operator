@@ -17,8 +17,18 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
+
+// EndpointDefaults 定义新建 Endpoint 的默认资源配置。
+// [未来 Serverless] 可扩展 AutoscalingLimitMinCU/MaxCU 字段。
+type EndpointDefaults struct {
+	// Resources 默认计算资源 (CPU/Memory)。
+	// 每个 Endpoint 可通过 Endpoint.Spec.Resources 覆盖。
+	// +optional
+	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
+}
 
 // ProjectSpec defines the desired state of Project
 type ProjectSpec struct {
@@ -33,6 +43,18 @@ type ProjectSpec struct {
 	// PostgreSQL version to use for the project.
 	// +optional
 	PGVersion int `json:"pgVersion"`
+
+	// Name 项目显示名称，用于 Control Plane API 响应。
+	// 区别于 metadata.name (K8s 内部标识, DNS label 约束)。
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	Name string `json:"name"`
+
+	// DefaultEndpointSettings 新建端点的默认资源配置。
+	// 当创建 Endpoint 且未指定 resources 时，使用此默认值。
+	// +optional
+	DefaultEndpointSettings *EndpointDefaults `json:"defaultEndpointSettings,omitempty"`
 }
 
 // ProjectStatus defines the observed state of Project.

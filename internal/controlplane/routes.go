@@ -16,6 +16,7 @@ func addRoutes(
 	log *slog.Logger,
 	k8sClient client.Client,
 	computeBaseURL string,
+	namespace string,
 ) {
 	// 处理compute_ctl发送来的配置请求，compute_ctl根据此请求返回的配置信息，来配置postgres实例
 	mux.Handle("/compute/api/v2/computes/{compute_id}/spec", logRequests(log, handleComputeSpec(log, k8sClient)))
@@ -23,6 +24,14 @@ func addRoutes(
 	mux.Handle("/readyz", logRequests(log, handleHealthCheck()))
 	mux.Handle("/notify-attach", logRequests(log, notifyAttach(log, k8sClient, computeBaseURL)))
 	mux.Handle("/notify-safekeepers", logRequests(log, notifySafekeepers(log, k8sClient, computeBaseURL)))
+
+	// Control Plane REST API v2（对标 Neon Cloud API）
+	apiSvc := &apiService{
+		log:       log.With("component", "api"),
+		k8sClient: k8sClient,
+		namespace: namespace,
+	}
+	addAPIRoutes(mux, apiSvc, log)
 }
 
 type responseWriter struct {

@@ -65,11 +65,11 @@ func StatefulSet(sk *v1alpha1.Safekeeper, image string) *appsv1.StatefulSet {
 }
 
 func podSpec(sk *v1alpha1.Safekeeper, image string) corev1.PodSpec {
-	// StatefulSet Pod FQDN:
+	// StatefulSet Pod FQDN (STS replica count = 1, ordinal = 0):
 	//   {pod-name}.{headless-service}.{namespace}.svc.cluster.local
-	// With pod name = {cluster}-safekeeper-{id} = Name(sk):
-	//   → {cluster}-safekeeper-{id}.{cluster}-safekeeper-{id}-headless.{ns}.svc.cluster.local
-	advertiseHost := fmt.Sprintf("%s.%s.%s.svc.cluster.local",
+	// With STS name = {cluster}-safekeeper-{id}, pod name = {cluster}-safekeeper-{id}-0:
+	//   → {cluster}-safekeeper-{id}-0.{cluster}-safekeeper-{id}-headless.{ns}.svc.cluster.local
+	advertiseHost := fmt.Sprintf("%s-0.%s.%s.svc.cluster.local",
 		Name(sk), HeadlessName(sk), sk.Namespace)
 
 	return corev1.PodSpec{

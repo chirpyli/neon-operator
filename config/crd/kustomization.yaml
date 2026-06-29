@@ -7,6 +7,10 @@ resources:
 - bases/neon.oltp.molnett.org_projects.yaml
 - bases/neon.oltp.molnett.org_pageservers.yaml
 - bases/neon.oltp.molnett.org_safekeepers.yaml
+- bases/neon.oltp.molnett.org_databases.yaml
+- bases/neon.oltp.molnett.org_endpoints.yaml
+- bases/neon.oltp.molnett.org_operations.yaml
+- bases/neon.oltp.molnett.org_roles.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:

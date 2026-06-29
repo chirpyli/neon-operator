@@ -8,4 +8,8 @@ const (
 	PageserverNameKey contextKey = "pageserver"
 	ProjectNameKey    contextKey = "project"
 	BranchNameKey     contextKey = "branch"
+	EndpointNameKey   contextKey = "endpoint"
+	RoleNameKey       contextKey = "role"
+	DatabaseNameKey   contextKey = "database"
+	OperationNameKey  contextKey = "operation"
 )
