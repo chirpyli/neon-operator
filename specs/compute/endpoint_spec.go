@@ -1,18 +1,25 @@
 package compute
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"os"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
 	"oltp.molnett.org/neon-operator/utils"
 )
+
+// endpointLogger 为 endpoint 包提供一个默认 logger，避免硬依赖 slog。
+var endpointLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 // =============================================================================
 // Endpoint 专用的 Compute Spec 构建函数
@@ -137,9 +144,18 @@ func EndpointDeployment(endpoint *neonv1alpha1.Endpoint, branch *neonv1alpha1.Br
 	}
 }
 
+// defaultPostgresPassword 是 postgres 角色的默认 SCRAM-SHA-256 密码 verifier。
+// 对应明文密码为 "postgres"（仅用于开发/测试环境）。
+const defaultPostgresPassword = "SCRAM-SHA-256$4096:159kANhgWW13pz78P02IMQ==$grA4JzZPeRmUeV8VjsCzn8QhgdcUZZXXPyUf3vyZZV4=:XgEolgh2F/C2yTbY16t856WqifqPlQsRnCUU4Q7BLVM="
+
 // EndpointConfigMap 为 Endpoint 构建 ConfigMap。
-// 区别于 Branch 的 ConfigMap：此函数从集群中读取 Role/Database CR 来填充 compute spec。
+// 从集群中读取 Role/Database CR 来填充 compute spec 中的 roles 和 databases 列表。
+//
+// k8sClient 和 ctx 用于查询同一分支下的 Role 和 Database CR。
+// 如果 k8sClient 为 nil，则退化为 Phase 1 行为（仅 postgres 角色，空 databases）。
 func EndpointConfigMap(
+	ctx context.Context,
+	k8sClient client.Client,
 	endpoint *neonv1alpha1.Endpoint,
 	branch *neonv1alpha1.Branch,
 	project *neonv1alpha1.Project,
@@ -157,7 +173,7 @@ func EndpointConfigMap(
 		ClusterID string          `json:"cluster_id"`
 		Name      string          `json:"name"`
 		Roles     []Role          `json:"roles"`
-		Databases []interface{}   `json:"databases"`
+		Databases []Database      `json:"databases"`
 		Settings  []SettingsEntry `json:"settings"`
 	}
 
@@ -171,17 +187,11 @@ func EndpointConfigMap(
 		ComputeCtlConfig computeCtlConfig `json:"compute_ctl_config"`
 	}
 
-	// 默认 role：postgres 用户
-	roles := []Role{
-		{
-			Name:              "postgres",
-			EncryptedPassword: "SCRAM-SHA-256$4096:159kANhgWW13pz78P02IMQ==$grA4JzZPeRmUeV8VjsCzn8QhgdcUZZXXPyUf3vyZZV4=:XgEolgh2F/C2yTbY16t856WqifqPlQsRnCUU4Q7BLVM=",
-			Options:           nil,
-		},
-	}
+	// 聚合 roles：默认 postgres + 从 Role CR 聚合的用户角色
+	roles := aggregateRoles(ctx, k8sClient, branch.Name, project)
 
-	// Phase 2+: 从 Role/Database CR 聚合 roles 和 databases
-	// 当前阶段：使用默认的 postgres role 和空 databases 列表
+	// 聚合 databases：从 Database CR 聚合
+	databases := aggregateDatabases(ctx, k8sClient, branch.Name)
 
 	spec := computeSpec{
 		FormatVersion: "1.0",
@@ -189,7 +199,7 @@ func EndpointConfigMap(
 			ClusterID: project.Spec.TenantID,
 			Name:      project.Name,
 			Roles:     roles,
-			Databases: []interface{}{},
+			Databases: databases,
 			Settings: []SettingsEntry{
 				{Name: "neon.tenant_id", Value: project.Spec.TenantID, Vartype: "string"},
 				{Name: "neon.timeline_id", Value: branch.Spec.TimelineID, Vartype: "string"},
@@ -222,6 +232,104 @@ func EndpointConfigMap(
 			"spec.json": string(specJSON),
 		},
 	}, nil
+}
+
+// aggregateRoles 从 K8s Role CR 聚合成 compute_ctl spec 所需的 roles 列表。
+// 始终包含默认的 postgres 角色，然后追加同分支下非保护、非 postgres、非 no_login 的用户角色。
+func aggregateRoles(ctx context.Context, k8sClient client.Client, branchID string, project *neonv1alpha1.Project) []Role {
+	// 默认 postgres 角色（始终存在）
+	roles := []Role{
+		{
+			Name:              "postgres",
+			EncryptedPassword: defaultPostgresPassword,
+			Options:           nil,
+		},
+	}
+
+	// 如果没有 k8sClient，退化为 Phase 1 行为
+	if k8sClient == nil {
+		return roles
+	}
+
+	var roleList neonv1alpha1.RoleList
+	if err := k8sClient.List(ctx, &roleList,
+		client.MatchingFields{"spec.branchID": branchID},
+		client.InNamespace(project.Namespace),
+	); err != nil {
+		endpointLogger.Warn("aggregateRoles: failed to list Role CRs, falling back to default",
+			"branchID", branchID, "error", err)
+		return roles
+	}
+
+	for _, roleCR := range roleList.Items {
+		// 跳过系统保护角色
+		if roleCR.Status.Protected {
+			continue
+		}
+		// 跳过 postgres（已默认添加）
+		if roleCR.Spec.Name == "postgres" {
+			continue
+		}
+		// 跳过 no_login 角色（不需要密码认证）
+		if roleCR.Spec.AuthenticationMethod == "no_login" {
+			continue
+		}
+		// 需要有 EncryptedPassword 才能写入 spec
+		if roleCR.Status.EncryptedPassword == "" {
+			endpointLogger.Warn("aggregateRoles: skipping role without encrypted password, SCRAM hash not yet computed",
+				"role", roleCR.Spec.Name)
+			continue
+		}
+
+		roles = append(roles, Role{
+			Name:              roleCR.Spec.Name,
+			EncryptedPassword: roleCR.Status.EncryptedPassword,
+			Options:           buildRoleOptions(roleCR.Spec.AuthenticationMethod),
+		})
+	}
+
+	return roles
+}
+
+// buildRoleOptions 根据认证方式构建 role 的 options。
+// oauth 方式不需要 LOGIN 属性（compute_ctl 会处理 JWKS 验证）。
+func buildRoleOptions(authMethod string) any {
+	if authMethod == "oauth" {
+		return nil
+	}
+	return nil
+}
+
+// aggregateDatabases 从 K8s Database CR 聚合成 compute_ctl spec 所需的 databases 列表。
+func aggregateDatabases(ctx context.Context, k8sClient client.Client, branchID string) []Database {
+	// 如果没有 k8sClient，退化为空列表
+	if k8sClient == nil {
+		return nil
+	}
+
+	var dbList neonv1alpha1.DatabaseList
+	if err := k8sClient.List(ctx, &dbList,
+		client.MatchingFields{"spec.branchID": branchID},
+	); err != nil {
+		endpointLogger.Warn("aggregateDatabases: failed to list Database CRs",
+			"branchID", branchID, "error", err)
+		return nil
+	}
+
+	databases := make([]Database, 0, len(dbList.Items))
+	for _, dbCR := range dbList.Items {
+		owner := dbCR.Spec.OwnerName
+		if owner == "" {
+			owner = "postgres" // 默认 owner
+		}
+		databases = append(databases, Database{
+			Name:    dbCR.Spec.Name,
+			Owner:   owner,
+			Options: nil,
+		})
+	}
+
+	return databases
 }
 
 // EndpointAdminService 为 Endpoint 构建 admin Service。

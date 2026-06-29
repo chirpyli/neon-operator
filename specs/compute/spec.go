@@ -108,6 +108,14 @@ type Role struct {
 	Options           interface{} `json:"options"`
 }
 
+// Database represents a database configuration in the compute spec.
+// Replaces the previous []interface{} weak type.
+type Database struct {
+	Name    string      `json:"name"`
+	Owner   string      `json:"owner"`
+	Options interface{} `json:"options"`
+}
+
 type SettingsEntry struct {
 	Name    string `json:"name"`
 	Value   string `json:"value"`
@@ -119,7 +127,7 @@ type ClusterConfig struct {
 	ClusterID string          `json:"cluster_id"`
 	Name      string          `json:"name"`
 	Roles     []Role          `json:"roles"`
-	Databases []interface{}   `json:"databases"`
+	Databases []Database      `json:"databases"`
 	Settings  []SettingsEntry `json:"settings"`
 }
 
@@ -317,7 +325,13 @@ func GenerateComputeSpec(
 
 	log.Info("Successfully retrieved JWT keys")
 
-	// 4. 查询集群实际的 Safekeeper CR，获取真实 ID 列表
+	// 4. 从 Role/Database CR 聚合用户和数据库（与 EndpointConfigMap 共用同一套聚合逻辑）
+	roles := aggregateRoles(ctx, k8sClient, branch.Name, project)
+	databases := aggregateDatabases(ctx, k8sClient, branch.Name)
+
+	log.Info("Aggregated roles and databases", "roles", len(roles), "databases", len(databases))
+
+	// 5. 查询集群实际的 Safekeeper CR，获取真实 ID 列表
 	safekeeperIDs, err := listSafekeeperIDs(ctx, k8sClient, clusterName)
 	if err != nil {
 		log.Warn("Failed to list safekeepers, falling back to default IDs 1,2,3", "error", err)
@@ -347,10 +361,10 @@ func GenerateComputeSpec(
 	readOnly := endpointType == "read_only"
 	log.Info("Compute endpoint type", "type", endpointType, "readOnly", readOnly)
 
-	// 5. Build postgres settings
+	// 6. Build postgres settings
 	settings := buildPostgresSettings(clusterName, safekeeperIDs, project.Spec.TenantID, branch.Spec.TimelineID, readOnly)
 
-	// 6. Generate spec
+	// 7. Generate spec
 	shards := make(map[string]PageserverShardInfo)
 
 	var actualRequest *ComputeHookNotifyRequest
@@ -391,14 +405,8 @@ func GenerateComputeSpec(
 					Cluster: ClusterConfig{
 						ClusterID: project.Spec.TenantID,
 						Name:      project.Name,
-						Roles: []Role{
-							{
-								Name:              "postgres",
-								EncryptedPassword: "SCRAM-SHA-256$4096:Km5/BZAre9yFBET1xAdPNw==$44b7c0f429a55e012114486a11aac5ee37e6755c56d1f94ee411abb7437f1495:96d902e582558a407a3bb04fa1f9840dc57963fedcb636bbb5937febe90dca8e",
-								Options:           nil,
-							},
-						},
-						Databases: []interface{}{},
+						Roles:     roles,
+						Databases: databases,
 						Settings:  settings,
 					},
 					DeltaOperations:       []interface{}{},
@@ -459,14 +467,8 @@ func GenerateComputeSpec(
 			Cluster: ClusterConfig{
 				ClusterID: project.Spec.TenantID,
 				Name:      project.Name,
-				Roles: []Role{
-					{
-						Name:              "postgres", // 默认密码postgres
-						EncryptedPassword: "SCRAM-SHA-256$4096:159kANhgWW13pz78P02IMQ==$grA4JzZPeRmUeV8VjsCzn8QhgdcUZZXXPyUf3vyZZV4=:XgEolgh2F/C2yTbY16t856WqifqPlQsRnCUU4Q7BLVM=",
-						Options:           nil,
-					},
-				},
-				Databases: []interface{}{},
+				Roles:     roles,
+				Databases: databases,
 				Settings:  settings,
 			},
 			DeltaOperations:       []interface{}{},

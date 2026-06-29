@@ -30,8 +30,8 @@ func ConfigMap(
 	type clusterConfig struct {
 		ClusterID string          `json:"cluster_id"`
 		Name      string          `json:"name"`
-		Roles     []interface{}   `json:"roles"`
-		Databases []interface{}   `json:"databases"`
+		Roles     []Role          `json:"roles"`
+		Databases []Database      `json:"databases"`
 		Settings  []SettingsEntry `json:"settings"`
 	}
 
@@ -50,8 +50,8 @@ func ConfigMap(
 		Cluster: clusterConfig{
 			ClusterID: project.Spec.TenantID,
 			Name:      project.Name,
-			Roles:     []interface{}{},
-			Databases: []interface{}{},
+			Roles:     []Role{},
+			Databases: []Database{},
 			Settings: []SettingsEntry{
 				{Name: "neon.tenant_id", Value: project.Spec.TenantID, Vartype: "string"},
 				{Name: "neon.timeline_id", Value: branch.Spec.TimelineID, Vartype: "string"},

@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"log/slog"
@@ -34,6 +35,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
@@ -301,6 +303,33 @@ func main() {
 			setupLog.Error(err, "unable to add webhook certificate watcher to manager")
 			os.Exit(1)
 		}
+	}
+
+	// 为 Role 和 Database 注册 spec.branchID 字段索引，用于 EndpointConfigMap
+	// 按分支聚合 roles 和 databases。
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&neonv1alpha1.Role{},
+		"spec.branchID",
+		func(rawObj client.Object) []string {
+			role := rawObj.(*neonv1alpha1.Role)
+			return []string{role.Spec.BranchID}
+		},
+	); err != nil {
+		setupLog.Error(err, "unable to set up field index for Role.spec.branchID")
+		os.Exit(1)
+	}
+	if err := mgr.GetFieldIndexer().IndexField(
+		context.Background(),
+		&neonv1alpha1.Database{},
+		"spec.branchID",
+		func(rawObj client.Object) []string {
+			db := rawObj.(*neonv1alpha1.Database)
+			return []string{db.Spec.BranchID}
+		},
+	); err != nil {
+		setupLog.Error(err, "unable to set up field index for Database.spec.branchID")
+		os.Exit(1)
 	}
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

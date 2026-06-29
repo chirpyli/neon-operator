@@ -135,6 +135,12 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              encryptedPassword:
+                description: |-
+                  EncryptedPassword 密码的 SCRAM-SHA-256 verifier，用于写入 compute_ctl 的 spec。
+                  由 RoleController 从 Secret 中读取明文密码后计算得到。
+                  格式: SCRAM-SHA-256$4096:<base64_salt>$<base64_stored_key>:<base64_server_key>
+                type: string
               observedGeneration:
                 description: ObservedGeneration 记录最近观察到的 generation。
                 format: int64

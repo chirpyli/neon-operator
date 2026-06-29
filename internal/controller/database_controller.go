@@ -181,6 +181,12 @@ func (r *DatabaseReconciler) finalize(ctx context.Context, database *neonv1alpha
 		return ctrl.Result{}, nil
 	}
 
+	// [Phase 2.7] 删除前触发 Endpoint ConfigMap 更新，从 spec 中移除该数据库
+	if err := r.triggerEndpointReconcile(ctx, database); err != nil {
+		log.Error(err, "failed to trigger endpoint reconcile during database deletion")
+		// 不返回错误，允许继续删除（最终一致性）
+	}
+
 	current := &neonv1alpha1.Database{}
 	if err := r.Get(ctx, types.NamespacedName{Name: database.Name, Namespace: database.Namespace}, current); err != nil {
 		if apierrors.IsNotFound(err) {

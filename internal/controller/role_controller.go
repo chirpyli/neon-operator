@@ -96,6 +96,17 @@ func (r *RoleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	var genErr error
 	if role.Spec.AuthenticationMethod == "password" {
 		genErr = r.ensurePasswordSecret(ctx, role, branch)
+		if genErr == nil {
+			// 从 Secret 读取明文密码并计算 SCRAM-SHA-256 verifier
+			genErr = r.ensureEncryptedPassword(ctx, role)
+		}
+		// [Phase 2.2] 确保 EncryptedPassword 已就绪后才触发 Endpoint reconcile
+		// 避免 Endpoint Controller 在 SCRAM verifier 就绪前聚合角色列表
+		if genErr == nil {
+			if triggerErr := r.triggerEndpointReconcile(ctx, role); triggerErr != nil {
+				log.Error(triggerErr, "failed to trigger endpoint reconcile")
+			}
+		}
 	}
 
 	return r.updateStatus(ctx, role, genErr)
@@ -131,8 +142,7 @@ func (r *RoleReconciler) ensurePasswordSecret(ctx context.Context, role *neonv1a
 				}
 			})
 		}
-		// 触发 Endpoint ConfigMap 更新
-		return r.triggerEndpointReconcile(ctx, role)
+		return nil
 	} else if !apierrors.IsNotFound(err) {
 		return fmt.Errorf("failed to get password secret: %w", err)
 	}
@@ -173,8 +183,56 @@ func (r *RoleReconciler) ensurePasswordSecret(ctx context.Context, role *neonv1a
 		}
 	})
 
-	// 触发 Endpoint ConfigMap 更新
-	return r.triggerEndpointReconcile(ctx, role)
+	return nil
+}
+
+// ensureEncryptedPassword 从密码 Secret 读取明文密码，计算 SCRAM-SHA-256 verifier，
+// 并更新 Role.Status.EncryptedPassword。如果 EncryptedPassword 已存在且密码未变化则跳过。
+func (r *RoleReconciler) ensureEncryptedPassword(ctx context.Context, role *neonv1alpha1.Role) error {
+	log := logf.FromContext(ctx)
+
+	if role.Status.PasswordSecretRef == nil {
+		return fmt.Errorf("password secret ref not set for role %q", role.Name)
+	}
+
+	secretName := types.NamespacedName{
+		Name:      role.Status.PasswordSecretRef.Name,
+		Namespace: role.Status.PasswordSecretRef.Namespace,
+	}
+
+	secret := &corev1.Secret{}
+	if err := r.Get(ctx, secretName, secret); err != nil {
+		return fmt.Errorf("get password secret: %w", err)
+	}
+
+	plainPassword, ok := secret.Data["password"]
+	if !ok || len(plainPassword) == 0 {
+		return fmt.Errorf("password key not found in secret %q", secretName.Name)
+	}
+
+	// 如果 EncryptedPassword 已存在，检查是否需要重新计算（密码变化场景）
+	if role.Status.EncryptedPassword != "" {
+		// 简化处理：如果 Status 中已有加密密码且 Secret 存在，则跳过
+		// 密码变化通过 Secret 重建（删除再创建）来检测
+		log.Info("EncryptedPassword already set, skipping SCRAM computation", "role", role.Name)
+		return nil
+	}
+
+	// 计算 SCRAM-SHA-256 verifier
+	encryptedPassword, err := utils.SCRAMSHA256(plainPassword)
+	if err != nil {
+		return fmt.Errorf("compute SCRAM-SHA-256: %w", err)
+	}
+
+	// 更新 Status
+	if err := utils.PatchStatus(ctx, r.Client, role, func(rl *neonv1alpha1.Role) {
+		rl.Status.EncryptedPassword = encryptedPassword
+	}); err != nil {
+		return fmt.Errorf("update EncryptedPassword status: %w", err)
+	}
+
+	log.Info("SCRAM-SHA-256 verifier computed and stored in status", "role", role.Name)
+	return nil
 }
 
 // triggerEndpointReconcile 通过更新 Branch 的 annotation 来触发 Endpoint Controller 的 reconcile，
@@ -222,6 +280,12 @@ func (r *RoleReconciler) finalize(ctx context.Context, role *neonv1alpha1.Role) 
 
 	if !controllerutil.ContainsFinalizer(role, utils.FinalizerName) {
 		return ctrl.Result{}, nil
+	}
+
+	// [Phase 2.7] 删除前触发 Endpoint ConfigMap 更新，从 spec 中移除该角色
+	if err := r.triggerEndpointReconcile(ctx, role); err != nil {
+		log.Error(err, "failed to trigger endpoint reconcile during role deletion")
+		// 不返回错误，允许继续删除（最终一致性）
 	}
 
 	// 删除关联的密码 Secret

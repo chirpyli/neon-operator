@@ -20,6 +20,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"os"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -31,9 +33,12 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
+	"oltp.molnett.org/neon-operator/specs/compute"
 	"oltp.molnett.org/neon-operator/utils"
 )
 
@@ -326,6 +331,112 @@ func (r *EndpointReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&appsv1.Deployment{}).
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
+		// [Phase 2.6] Watch Role CR 变更 → 触发对应 Endpoint reconcile
+		Watches(&neonv1alpha1.Role{},
+			handler.EnqueueRequestsFromMapFunc(r.mapRoleToEndpoint),
+		).
+		// [Phase 2.6] Watch Database CR 变更 → 触发对应 Endpoint reconcile
+		Watches(&neonv1alpha1.Database{},
+			handler.EnqueueRequestsFromMapFunc(r.mapDatabaseToEndpoint),
+		).
 		Named("endpoint").
 		Complete(r)
+}
+
+// =============================================================================
+// Phase 2.5: 热更新 — POST /configure
+// =============================================================================
+
+// endpointHotReloadLogger 为热更新提供 logger。
+var endpointHotReloadLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+// tryHotReload 尝试通过 POST /configure 向运行中的 compute pod 推送新配置。
+// 失败时不返回错误（降级策略：ConfigMap 已更新，下次 Pod 重启自动生效）。
+func (r *EndpointReconciler) tryHotReload(ctx context.Context, endpoint *neonv1alpha1.Endpoint) error {
+	log := logf.FromContext(ctx)
+
+	deploymentName := endpointDeploymentName(endpoint)
+	dep := &appsv1.Deployment{}
+	if err := r.Get(ctx, types.NamespacedName{Name: deploymentName, Namespace: endpoint.Namespace}, dep); err != nil {
+		return fmt.Errorf("get deployment: %w", err)
+	}
+
+	// 只有 Pod 就绪时才推送热更新
+	if !utils.IsDeploymentAvailable(dep) {
+		return fmt.Errorf("deployment not available")
+	}
+
+	// 构造 admin URL
+	adminURL := fmt.Sprintf("http://endpoint-%s-admin.%s.svc.cluster.local:3080",
+		endpoint.Name, endpoint.Namespace)
+
+	// 构造 notify request（从 deployment 提取信息）
+	request := compute.ComputeHookNotifyRequest{
+		TenantID: dep.Labels["neon.tenant_id"],
+	}
+
+	if err := compute.RefreshConfiguration(ctx, endpointHotReloadLogger, r.Client, request, dep, adminURL); err != nil {
+		return fmt.Errorf("refresh configuration: %w", err)
+	}
+
+	log.Info("Hot reload succeeded via POST /configure", "endpoint", endpoint.Name)
+	return nil
+}
+
+// =============================================================================
+// Phase 2.6: Watch Role/Database CR → Endpoint 映射
+// =============================================================================
+
+// mapRoleToEndpoint 将 Role CR 变更映射到对应的 Endpoint reconcile 请求。
+func (r *EndpointReconciler) mapRoleToEndpoint(ctx context.Context, obj client.Object) []reconcile.Request {
+	role, ok := obj.(*neonv1alpha1.Role)
+	if !ok {
+		return nil
+	}
+
+	// 查找同 Branch 的 Endpoint（按 branchID 标签查询）
+	var endpointList neonv1alpha1.EndpointList
+	if err := r.List(ctx, &endpointList,
+		client.InNamespace(role.Namespace),
+		client.MatchingLabels{"molnett.org/branch": role.Spec.BranchID},
+	); err != nil {
+		endpointHotReloadLogger.Warn("mapRoleToEndpoint: failed to list endpoints",
+			"branchID", role.Spec.BranchID, "error", err)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(endpointList.Items))
+	for _, ep := range endpointList.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(&ep),
+		})
+	}
+	return requests
+}
+
+// mapDatabaseToEndpoint 将 Database CR 变更映射到对应的 Endpoint reconcile 请求。
+func (r *EndpointReconciler) mapDatabaseToEndpoint(ctx context.Context, obj client.Object) []reconcile.Request {
+	db, ok := obj.(*neonv1alpha1.Database)
+	if !ok {
+		return nil
+	}
+
+	// 查找同 Branch 的 Endpoint
+	var endpointList neonv1alpha1.EndpointList
+	if err := r.List(ctx, &endpointList,
+		client.InNamespace(db.Namespace),
+		client.MatchingLabels{"molnett.org/branch": db.Spec.BranchID},
+	); err != nil {
+		endpointHotReloadLogger.Warn("mapDatabaseToEndpoint: failed to list endpoints",
+			"branchID", db.Spec.BranchID, "error", err)
+		return nil
+	}
+
+	requests := make([]reconcile.Request, 0, len(endpointList.Items))
+	for _, ep := range endpointList.Items {
+		requests = append(requests, reconcile.Request{
+			NamespacedName: client.ObjectKeyFromObject(&ep),
+		})
+	}
+	return requests
 }

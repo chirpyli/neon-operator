@@ -170,6 +170,9 @@ func (s *apiService) CreateProject(ctx context.Context, req ProjectCreateRequest
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      ids.EndpointID,
 			Namespace: s.namespace,
+			Labels: map[string]string{
+				"molnett.org/branch": ids.BranchID,
+			},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(branch, neonv1.GroupVersion.WithKind("Branch")),
 			},
@@ -211,7 +214,9 @@ func (s *apiService) CreateProject(ctx context.Context, req ProjectCreateRequest
 	}
 
 	// 创建密码 Secret
-	secretName := fmt.Sprintf("%s-%s-password", ids.BranchID, roleName)
+	// 命名必须与 Role Controller 的 ensurePasswordSecret 保持一致：
+	//   role-{role.Name}-password
+	secretName := fmt.Sprintf("role-%s-%s-password", ids.BranchID, roleName)
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
@@ -752,6 +757,9 @@ func (s *apiService) createEndpointForBranch(ctx context.Context, project *neonv
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      endpointID,
 			Namespace: s.namespace,
+			Labels: map[string]string{
+				"molnett.org/branch": branchID,
+			},
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(
 					&neonv1.Branch{ObjectMeta: metav1.ObjectMeta{Name: branchID, Namespace: s.namespace}},
@@ -933,7 +941,7 @@ func (s *apiService) CreateRole(ctx context.Context, projectID, branchID string,
 		return nil, fmt.Errorf("create role CR: %w", err)
 	}
 
-	secretName := fmt.Sprintf("%s-%s-password", branchID, roleName)
+	secretName := fmt.Sprintf("role-%s-%s-password", branchID, roleName)
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
@@ -1012,7 +1020,7 @@ func (s *apiService) ResetPassword(ctx context.Context, projectID, branchID, rol
 		if r.Spec.BranchID == branchID && r.Spec.Name == roleName {
 			newPassword := generatePassword()
 
-			secretName := fmt.Sprintf("%s-%s-password", branchID, roleName)
+			secretName := fmt.Sprintf("role-%s-%s-password", branchID, roleName)
 			secret := &corev1.Secret{}
 			if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: secretName, Namespace: s.namespace}, secret); err == nil {
 				secret.StringData = map[string]string{"password": newPassword}

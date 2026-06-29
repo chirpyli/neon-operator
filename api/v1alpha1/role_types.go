@@ -52,6 +52,12 @@ type RoleStatus struct {
 	// +optional
 	PasswordSecretRef *corev1.SecretReference `json:"passwordSecretRef,omitempty"`
 
+	// EncryptedPassword 密码的 SCRAM-SHA-256 verifier，用于写入 compute_ctl 的 spec。
+	// 由 RoleController 从 Secret 中读取明文密码后计算得到。
+	// 格式: SCRAM-SHA-256$4096:<base64_salt>$<base64_stored_key>:<base64_server_key>
+	// +optional
+	EncryptedPassword string `json:"encryptedPassword,omitempty"`
+
 	// Protected 是否为系统保护角色（如创建分支时的 owner 角色）。
 	// +optional
 	Protected bool `json:"protected,omitempty"`

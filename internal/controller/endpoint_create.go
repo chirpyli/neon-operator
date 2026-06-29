@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -59,7 +61,7 @@ func (r *EndpointReconciler) reconcileEndpointConfigMap(ctx context.Context, end
 		return err
 	}
 
-	intendedConfigMap, err := compute.EndpointConfigMap(endpoint, branch, project, jwkSecret)
+	intendedConfigMap, err := compute.EndpointConfigMap(ctx, r.Client, endpoint, branch, project, jwkSecret)
 	if err != nil {
 		return err
 	}
@@ -85,7 +87,9 @@ func (r *EndpointReconciler) reconcileEndpointConfigMap(ctx context.Context, end
 		return nil
 	}
 
-	if !equality.Semantic.DeepDerivative(intendedConfigMap.Data, currentConfigMap.Data) {
+	configMapChanged := !equality.Semantic.DeepDerivative(intendedConfigMap.Data, currentConfigMap.Data)
+
+	if configMapChanged {
 		if err := r.Patch(ctx, intendedConfigMap, client.Apply, &client.PatchOptions{
 			Force:        ptr.To(true),
 			FieldManager: utils.FieldManager,
@@ -93,6 +97,12 @@ func (r *EndpointReconciler) reconcileEndpointConfigMap(ctx context.Context, end
 			return fmt.Errorf("failed to update endpoint ConfigMap: %w", err)
 		}
 		log.Info("Endpoint ConfigMap updated", "name", endpoint.Name)
+
+		// [Phase 2.5] ConfigMap 更新后尝试热推送到 running Pod
+		if err := r.tryHotReload(ctx, endpoint); err != nil {
+			log.Info("Hot reload skipped (pod will pick up config on restart)",
+				"endpoint", endpoint.Name, "reason", err)
+		}
 		return nil
 	}
 
@@ -108,6 +118,19 @@ func (r *EndpointReconciler) reconcileEndpointDeployment(ctx context.Context, en
 	resources := getEffectiveResources(endpoint, project)
 	if resources != nil {
 		intendedDeployment.Spec.Template.Spec.Containers[0].Resources = *resources
+	}
+
+	// 读取当前 spec ConfigMap 并计算 checksum，注入到 PodTemplate annotation。
+	// 当 ConfigMap 变更（如 role/database 的 SCRAM 密钥就绪后更新）时，
+	// Deployment Spec 也会变化，从而触发 Kubernetes 滚动重启 Pod。
+	cmName := fmt.Sprintf("endpoint-%s-spec", endpoint.Name)
+	var specCM corev1.ConfigMap
+	if err := r.Get(ctx, types.NamespacedName{Name: cmName, Namespace: endpoint.Namespace}, &specCM); err == nil {
+		hash := configMapDataChecksum(specCM.Data)
+		if intendedDeployment.Spec.Template.ObjectMeta.Annotations == nil {
+			intendedDeployment.Spec.Template.ObjectMeta.Annotations = make(map[string]string)
+		}
+		intendedDeployment.Spec.Template.ObjectMeta.Annotations["neon.oltp.molnett.org/spec-checksum"] = hash
 	}
 
 	var currentDeployment appsv1.Deployment
@@ -263,3 +286,15 @@ func endpointDeploymentName(endpoint *neonv1alpha1.Endpoint) string {
 }
 
 func ptrToInt32(i int32) *int32 { return &i }
+
+// configMapDataChecksum 计算 ConfigMap Data 的 SHA-256 checksum，
+// 用作 Deployment PodTemplate 的 annotation，确保 ConfigMap 变更触发 Pod 滚动重启。
+func configMapDataChecksum(data map[string]string) string {
+	h := sha256.New()
+	for k, v := range data {
+		h.Write([]byte(k))
+		h.Write([]byte{0})
+		h.Write([]byte(v))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
