@@ -114,46 +114,14 @@ func podSpec(sk *v1alpha1.Safekeeper, image string) corev1.PodSpec {
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: storageVolumeName, MountPath: "/data"},
 				},
-				// Health probes using /v1/status (the only unauthenticated endpoint)
-				LivenessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path:   "/v1/status",
-							Port:   intstr.FromInt(7676),
-							Scheme: corev1.URISchemeHTTP,
-						},
-					},
-					InitialDelaySeconds: 10,
-					PeriodSeconds:       10,
-					TimeoutSeconds:      5,
-					FailureThreshold:    3,
-				},
-				ReadinessProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path:   "/v1/status",
-							Port:   intstr.FromInt(7676),
-							Scheme: corev1.URISchemeHTTP,
-						},
-					},
-					InitialDelaySeconds: 5,
-					PeriodSeconds:       5,
-					TimeoutSeconds:      3,
-					FailureThreshold:    2,
-				},
-				StartupProbe: &corev1.Probe{
-					ProbeHandler: corev1.ProbeHandler{
-						HTTPGet: &corev1.HTTPGetAction{
-							Path:   "/v1/status",
-							Port:   intstr.FromInt(7676),
-							Scheme: corev1.URISchemeHTTP,
-						},
-					},
-					InitialDelaySeconds: 5,
-					PeriodSeconds:       5,
-					TimeoutSeconds:      5,
-					FailureThreshold:    12, // 60s total tolerance
-				},
+				// Health probes using /v1/status (the only unauthenticated endpoint).
+				// Default parameters are aligned with SC heartbeat intervals:
+				// - Liveness: ~30s detection window → matches max_offline_interval=30s
+				// - Readiness: 5s period → matches heartbeat_interval=5s
+				// - Startup:  60s window → Safekeeper starts fast (no cold-start from S3)
+				LivenessProbe:  probeWithConfig("/v1/status", 7676, 10, 10, 5, 3, sk.Spec.LivenessProbe),
+				ReadinessProbe: probeWithConfig("/v1/status", 7676, 5, 5, 3, 2, sk.Spec.ReadinessProbe),
+				StartupProbe:   probeWithConfig("/v1/status", 7676, 5, 5, 5, 12, sk.Spec.StartupProbe),
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{
 						corev1.ResourceCPU:    resource.MustParse("500m"),
@@ -167,4 +135,39 @@ func podSpec(sk *v1alpha1.Safekeeper, image string) corev1.PodSpec {
 			},
 		},
 	}
+}
+
+// probeWithConfig builds a *corev1.Probe using the given defaults, then
+// applies any overrides from cfg. The path, port, and scheme are fixed
+// because they correspond to upstream Neon's API design.
+func probeWithConfig(path string, port int, initialDelay, period, timeout, failure int32, cfg *v1alpha1.ProbeConfig) *corev1.Probe {
+	probe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{
+				Path:   path,
+				Port:   intstr.FromInt(port),
+				Scheme: corev1.URISchemeHTTP,
+			},
+		},
+		InitialDelaySeconds: initialDelay,
+		PeriodSeconds:       period,
+		TimeoutSeconds:      timeout,
+		FailureThreshold:    failure,
+	}
+	if cfg == nil {
+		return probe
+	}
+	if cfg.InitialDelaySeconds != nil {
+		probe.InitialDelaySeconds = *cfg.InitialDelaySeconds
+	}
+	if cfg.PeriodSeconds != nil {
+		probe.PeriodSeconds = *cfg.PeriodSeconds
+	}
+	if cfg.TimeoutSeconds != nil {
+		probe.TimeoutSeconds = *cfg.TimeoutSeconds
+	}
+	if cfg.FailureThreshold != nil {
+		probe.FailureThreshold = *cfg.FailureThreshold
+	}
+	return probe
 }

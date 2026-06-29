@@ -89,3 +89,7 @@ Operator 在 8080 端口上暴露 HTTP 接口：
 ## 其他
 
 代码注释请用中文注释
+
+深度调研：
+neon: /home/postgres/works/opensource/neon
+neon api: https://api-docs.neon.tech/reference/getting-started-with-neon-api

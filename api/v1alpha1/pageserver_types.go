@@ -21,6 +21,30 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// ProbeConfig allows overriding the default container health probe parameters.
+// Only threshold/hysteresis parameters are exposed; the endpoint path, port,
+// and scheme are fixed by the operator (they correspond to upstream Neon's
+// design where only /v1/status is unauthenticated and suitable for K8s probes).
+type ProbeConfig struct {
+	// InitialDelaySeconds is the number of seconds after the container has
+	// started before the probe is initiated. Overrides the operator default.
+	// +optional
+	InitialDelaySeconds *int32 `json:"initialDelaySeconds,omitempty"`
+
+	// PeriodSeconds is how often (in seconds) to perform the probe.
+	// +optional
+	PeriodSeconds *int32 `json:"periodSeconds,omitempty"`
+
+	// TimeoutSeconds is the number of seconds after which the probe times out.
+	// +optional
+	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
+
+	// FailureThreshold is the number of consecutive failures required to
+	// consider the probe failed.
+	// +optional
+	FailureThreshold *int32 `json:"failureThreshold,omitempty"`
+}
+
 // NodeFailureRecoveryConfig 控制节点故障时的自动恢复策略。
 type NodeFailureRecoveryConfig struct {
 	// AutoRecover 是否在节点宕机时自动删除 PVC 并重建。
@@ -65,6 +89,24 @@ type PageserverSpec struct {
 	// NodeFailure 控制节点故障时的自动恢复策略。
 	// +optional
 	NodeFailure *NodeFailureRecoveryConfig `json:"nodeFailure,omitempty"`
+
+	// LivenessProbe overrides the default liveness probe configuration.
+	// When nil, the operator uses built-in defaults that are aligned with
+	// the Storage Controller's max_offline_interval (30s).
+	// +optional
+	LivenessProbe *ProbeConfig `json:"livenessProbe,omitempty"`
+
+	// ReadinessProbe overrides the default readiness probe configuration.
+	// When nil, the operator uses built-in defaults that are aligned with
+	// the Storage Controller's heartbeat_interval (5s).
+	// +optional
+	ReadinessProbe *ProbeConfig `json:"readinessProbe,omitempty"`
+
+	// StartupProbe overrides the default startup probe configuration.
+	// When nil, the operator uses built-in defaults that are aligned with
+	// the Storage Controller's max_warming_up_interval (300s for cold starts).
+	// +optional
+	StartupProbe *ProbeConfig `json:"startupProbe,omitempty"`
 }
 
 // PageserverStatus defines the observed state of Pageserver.

@@ -60,6 +60,93 @@ spec:
                 format: int32
                 minimum: 1
                 type: integer
+              livenessProbe:
+                description: |-
+                  LivenessProbe overrides the default liveness probe configuration.
+                  When nil, the operator uses built-in defaults aligned with SC's
+                  max_offline_interval (30s).
+                properties:
+                  failureThreshold:
+                    description: |-
+                      FailureThreshold is the number of consecutive failures required to
+                      consider the probe failed.
+                    format: int32
+                    type: integer
+                  initialDelaySeconds:
+                    description: |-
+                      InitialDelaySeconds is the number of seconds after the container has
+                      started before the probe is initiated. Overrides the operator default.
+                    format: int32
+                    type: integer
+                  periodSeconds:
+                    description: PeriodSeconds is how often (in seconds) to perform
+                      the probe.
+                    format: int32
+                    type: integer
+                  timeoutSeconds:
+                    description: TimeoutSeconds is the number of seconds after which
+                      the probe times out.
+                    format: int32
+                    type: integer
+                type: object
+              readinessProbe:
+                description: |-
+                  ReadinessProbe overrides the default readiness probe configuration.
+                  When nil, the operator uses built-in defaults aligned with SC's
+                  heartbeat_interval (5s).
+                properties:
+                  failureThreshold:
+                    description: |-
+                      FailureThreshold is the number of consecutive failures required to
+                      consider the probe failed.
+                    format: int32
+                    type: integer
+                  initialDelaySeconds:
+                    description: |-
+                      InitialDelaySeconds is the number of seconds after the container has
+                      started before the probe is initiated. Overrides the operator default.
+                    format: int32
+                    type: integer
+                  periodSeconds:
+                    description: PeriodSeconds is how often (in seconds) to perform
+                      the probe.
+                    format: int32
+                    type: integer
+                  timeoutSeconds:
+                    description: TimeoutSeconds is the number of seconds after which
+                      the probe times out.
+                    format: int32
+                    type: integer
+                type: object
+              startupProbe:
+                description: |-
+                  StartupProbe overrides the default startup probe configuration.
+                  When nil, the operator uses a 60s window (Safekeeper starts fast,
+                  no cold-start from S3 like Pageserver).
+                properties:
+                  failureThreshold:
+                    description: |-
+                      FailureThreshold is the number of consecutive failures required to
+                      consider the probe failed.
+                    format: int32
+                    type: integer
+                  initialDelaySeconds:
+                    description: |-
+                      InitialDelaySeconds is the number of seconds after the container has
+                      started before the probe is initiated. Overrides the operator default.
+                    format: int32
+                    type: integer
+                  periodSeconds:
+                    description: PeriodSeconds is how often (in seconds) to perform
+                      the probe.
+                    format: int32
+                    type: integer
+                  timeoutSeconds:
+                    description: TimeoutSeconds is the number of seconds after which
+                      the probe times out.
+                    format: int32
+                    type: integer
+                type: object
               storageConfig:
                 description: PVC configuration
                 properties:

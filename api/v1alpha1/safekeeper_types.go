@@ -42,6 +42,24 @@ type SafekeeperSpec struct {
 
 	// PVC configuration
 	StorageConfig StorageConfig `json:"storageConfig"`
+
+	// LivenessProbe overrides the default liveness probe configuration.
+	// When nil, the operator uses built-in defaults aligned with SC's
+	// max_offline_interval (30s).
+	// +optional
+	LivenessProbe *ProbeConfig `json:"livenessProbe,omitempty"`
+
+	// ReadinessProbe overrides the default readiness probe configuration.
+	// When nil, the operator uses built-in defaults aligned with SC's
+	// heartbeat_interval (5s).
+	// +optional
+	ReadinessProbe *ProbeConfig `json:"readinessProbe,omitempty"`
+
+	// StartupProbe overrides the default startup probe configuration.
+	// When nil, the operator uses a 60s window (Safekeeper starts fast,
+	// no cold-start from S3 like Pageserver).
+	// +optional
+	StartupProbe *ProbeConfig `json:"startupProbe,omitempty"`
 }
 
 // SafekeeperStatus defines the observed state of Safekeeper.
