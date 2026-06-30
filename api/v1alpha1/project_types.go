@@ -30,6 +30,17 @@ type EndpointDefaults struct {
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
+// IPAllowConfig 定义 IP 白名单访问控制规则。
+type IPAllowConfig struct {
+	// PrimaryBranchOnly 是否仅对主分支生效。
+	// +optional
+	PrimaryBranchOnly bool `json:"primaryBranchOnly,omitempty"`
+
+	// SourceRanges 允许的 CIDR 范围列表。
+	// +optional
+	SourceRanges []string `json:"sourceRanges,omitempty"`
+}
+
 // ProjectSpec defines the desired state of Project
 type ProjectSpec struct {
 	// Name of the cluster where the project will be created.
@@ -55,6 +66,19 @@ type ProjectSpec struct {
 	// 当创建 Endpoint 且未指定 resources 时，使用此默认值。
 	// +optional
 	DefaultEndpointSettings *EndpointDefaults `json:"defaultEndpointSettings,omitempty"`
+
+	// HistoryRetentionSeconds 历史数据保留期（秒）。
+	// 用于控制 PITR（Point-In-Time Recovery）的时间窗口。
+	// 默认 604800（7 天）。
+	// +optional
+	// +kubebuilder:default:=604800
+	// +kubebuilder:validation:Minimum:=0
+	HistoryRetentionSeconds int64 `json:"historyRetentionSeconds,omitempty"`
+
+	// IPAllow IP 白名单配置。
+	// nil 表示不对 IP 进行限制。
+	// +optional
+	IPAllow *IPAllowConfig `json:"ipAllow,omitempty"`
 }
 
 // ProjectStatus defines the observed state of Project.

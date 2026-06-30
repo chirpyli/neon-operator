@@ -119,6 +119,29 @@ spec:
                         type: object
                     type: object
                 type: object
+              historyRetentionSeconds:
+                default: 604800
+                description: |-
+                  HistoryRetentionSeconds 历史数据保留期（秒）。
+                  用于控制 PITR（Point-In-Time Recovery）的时间窗口。
+                  默认 604800（7 天）。
+                format: int64
+                minimum: 0
+                type: integer
+              ipAllow:
+                description: |-
+                  IPAllow IP 白名单配置。
+                  nil 表示不对 IP 进行限制。
+                properties:
+                  primaryBranchOnly:
+                    description: PrimaryBranchOnly 是否仅对主分支生效。
+                    type: boolean
+                  sourceRanges:
+                    description: SourceRanges 允许的 CIDR 范围列表。
+                    items:
+                      type: string
+                    type: array
+                type: object
               name:
                 description: |-
                   Name 项目显示名称，用于 Control Plane API 响应。

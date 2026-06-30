@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"encoding/json"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -38,7 +39,102 @@ type ComputeResources struct {
 	Memory string `json:"memory,omitempty"`
 }
 
-// BranchPayload 分支创建负载
+// ---------- Project PATCH types ----------
+
+// ProjectUpdateRequest PATCH /api/v2/projects/{project_id} 请求体。
+type ProjectUpdateRequest struct {
+	Project ProjectUpdatePayload `json:"project"`
+}
+
+// ProjectUpdatePayload PATCH 请求体中的可更新字段。
+// 所有字段为可选：nil/未出现=Noop（保持原值），非nil=Upsert（设置新值）。
+// 对需要 Remove 语义的字段使用 Nullable[T] 包装。
+type ProjectUpdatePayload struct {
+	// Name 项目显示名称。nil: 保持不变，非nil: 更新名称。
+	// +optional
+	Name *string `json:"name,omitempty"`
+
+	// DefaultEndpointSettings 默认端点配置。
+	// nil: 保持不变，Upsert: 覆盖配置，Remove: 清空。
+	// +optional
+	DefaultEndpointSettings Nullable[DefaultEndpointSettingsUpdate] `json:"default_endpoint_settings"`
+
+	// HistoryRetentionSeconds 历史数据保留期（秒）。
+	// nil: 保持不变，非nil: 更新保留期。
+	// +optional
+	HistoryRetentionSeconds *int64 `json:"history_retention_seconds,omitempty"`
+
+	// IPAllow IP 白名单配置。
+	// nil: 保持不变，Upsert: 覆盖配置，Remove: 移除白名单。
+	// +optional
+	IPAllow Nullable[IPAllowConfigUpdate] `json:"ip_allow"`
+}
+
+// DefaultEndpointSettingsUpdate 端点默认配置的 PATCH 负载。
+type DefaultEndpointSettingsUpdate struct {
+	// Resources 计算资源规格。
+	// +optional
+	Resources *ComputeResources `json:"resources,omitempty"`
+}
+
+// IPAllowConfigUpdate IP 白名单的 PATCH 负载。
+type IPAllowConfigUpdate struct {
+	// PrimaryBranchOnly 是否仅对主分支生效。
+	PrimaryBranchOnly bool `json:"primary_branch_only"`
+
+	// SourceRanges 允许的 CIDR 范围列表。
+	SourceRanges []string `json:"source_ranges"`
+}
+
+// IPAllowResp API 响应中的 IP 白名单信息。
+type IPAllowResp struct {
+	PrimaryBranchOnly bool     `json:"primary_branch_only"`
+	SourceRanges      []string `json:"source_ranges"`
+}
+
+// ---------- Nullable — FieldPatch 三态语义 ----------
+
+// Nullable 可空包装，用于区分 "未出现"、"显式 null"、"有值" 三种状态。
+// 对应 Neon Rust 的 FieldPatch<T> 枚举：
+//
+//	JSON 字段未出现    → Nullable 自身为 nil (Go zero value) → Noop
+//	JSON "field": "v"  → {Valid: true, Value: &v}              → Upsert
+//	JSON "field": null → {Valid: true, Value: nil}             → Remove
+type Nullable[T any] struct {
+	Value *T
+	Valid bool
+}
+
+// UnmarshalJSON 自定义 JSON 反序列化，区分 null 和未出现。
+func (n *Nullable[T]) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		n.Valid = true
+		n.Value = nil
+		return nil
+	}
+	n.Valid = true
+	n.Value = new(T)
+	return json.Unmarshal(data, n.Value)
+}
+
+// MarshalJSON 自定义 JSON 序列化。
+func (n Nullable[T]) MarshalJSON() ([]byte, error) {
+	if !n.Valid || n.Value == nil {
+		return []byte("null"), nil
+	}
+	return json.Marshal(*n.Value)
+}
+
+// IsNoop 返回 true 表示该字段在 JSON 中未出现（保持原值）。
+func (n Nullable[T]) IsNoop() bool { return !n.Valid }
+
+// IsRemove 返回 true 表示该字段显式传入了 null（重置为默认）。
+func (n Nullable[T]) IsRemove() bool { return n.Valid && n.Value == nil }
+
+// IsUpsert 返回 true 表示该字段有具体值（更新）。
+func (n Nullable[T]) IsUpsert() bool { return n.Valid && n.Value != nil }
+
+// ----------
 type BranchPayload struct {
 	Name         string `json:"name,omitempty"`
 	RoleName     string `json:"role_name,omitempty"`
@@ -114,14 +210,16 @@ type DatabaseCreatePayload struct {
 
 // ProjectResponse 项目响应
 type ProjectResponse struct {
-	ID              string                   `json:"id"`
-	Name            string                   `json:"name"`
-	PGVersion       int                      `json:"pgVersion"`
-	Cluster         string                   `json:"cluster,omitempty"`
-	TenantID        string                   `json:"tenant_id,omitempty"`
-	CreatedAt       time.Time                `json:"created_at"`
-	UpdatedAt       time.Time                `json:"updated_at,omitempty"`
-	DefaultSettings *DefaultEndpointSettings `json:"default_endpoint_settings,omitempty"`
+	ID                      string                   `json:"id"`
+	Name                    string                   `json:"name"`
+	PGVersion               int                      `json:"pgVersion"`
+	Cluster                 string                   `json:"cluster,omitempty"`
+	TenantID                string                   `json:"tenant_id,omitempty"`
+	CreatedAt               time.Time                `json:"created_at"`
+	UpdatedAt               time.Time                `json:"updated_at,omitempty"`
+	DefaultSettings         *DefaultEndpointSettings `json:"default_endpoint_settings,omitempty"`
+	HistoryRetentionSeconds int64                    `json:"history_retention_seconds,omitempty"`
+	IPAllow                 *IPAllowResp             `json:"ip_allow,omitempty"`
 }
 
 // BranchResponse 分支响应

@@ -17,6 +17,7 @@ func addAPIRoutes(mux *http.ServeMux, svc *apiService, log *slog.Logger) {
 	mux.Handle("POST /api/v2/projects", logRequests(log, http.HandlerFunc(api.createProject)))
 	mux.Handle("GET /api/v2/projects", logRequests(log, http.HandlerFunc(api.listProjects)))
 	mux.Handle("GET /api/v2/projects/{project_id}", logRequests(log, http.HandlerFunc(api.getProject)))
+	mux.Handle("PATCH /api/v2/projects/{project_id}", logRequests(log, http.HandlerFunc(api.patchProject)))
 	mux.Handle("DELETE /api/v2/projects/{project_id}", logRequests(log, http.HandlerFunc(api.deleteProject)))
 
 	// ---------- Branches ----------
@@ -64,10 +65,13 @@ func (h *apiHandler) handleAPIError(w http.ResponseWriter, err error) {
 			"ROLE_NOT_FOUND", "DATABASE_NOT_FOUND", "OPERATION_NOT_FOUND",
 			"DEFAULT_BRANCH_NOT_FOUND":
 			status = http.StatusNotFound
-		case "DEFAULT_BRANCH_DELETE", "PROTECTED_BRANCH", "PROTECTED_ROLE":
+		case "DEFAULT_BRANCH_DELETE", "PROTECTED_BRANCH", "PROTECTED_ROLE",
+			"IMMUTABLE_FIELD":
 			status = http.StatusConflict
 		case "INVALID_NAME":
 			status = http.StatusBadRequest
+		case "VALIDATION_ERROR":
+			status = http.StatusUnprocessableEntity
 		}
 		writeAPIError(w, status, apiErr.Code, apiErr.Message)
 		return
@@ -136,6 +140,30 @@ func (h *apiHandler) deleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *apiHandler) patchProject(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if err := r.Body.Close(); err != nil {
+			h.log.Error("failed to close request body", "error", err)
+		}
+	}()
+
+	projectID := r.PathValue("project_id")
+
+	var req ProjectUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid JSON request body")
+		return
+	}
+
+	resp, err := h.svc.UpdateProject(r.Context(), projectID, req)
+	if err != nil {
+		h.handleAPIError(w, err)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, map[string]interface{}{"project": resp})
 }
 
 // =============================================================================

@@ -351,15 +351,7 @@ func (s *apiService) GetProject(ctx context.Context, projectID string) (*Project
 		return nil, fmt.Errorf("get project: %w", err)
 	}
 
-	return &ProjectResponse{
-		ID:              project.Name,
-		Name:            project.Spec.Name,
-		PGVersion:       project.Spec.PGVersion,
-		Cluster:         project.Spec.ClusterName,
-		TenantID:        project.Spec.TenantID,
-		CreatedAt:       project.CreationTimestamp.Time,
-		DefaultSettings: toDefaultSettings(project.Spec.DefaultEndpointSettings),
-	}, nil
+	return s.toProjectResponse(project), nil
 }
 
 // ListProjects 列出项目
@@ -385,6 +377,121 @@ func (s *apiService) ListProjects(ctx context.Context) (*ProjectListResponse, er
 		Projects:   projects,
 		Pagination: &Pagination{HasMore: false},
 	}, nil
+}
+
+// UpdateProject 部分更新项目配置（对标 Neon PATCH /api/v2/projects/{project_id}）。
+// 使用 K8s MergeFrom patch 实现原子更新，未传字段保持原值。
+func (s *apiService) UpdateProject(ctx context.Context, projectID string, req ProjectUpdateRequest) (*ProjectResponse, error) {
+	project := &neonv1.Project{}
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: projectID, Namespace: s.namespace}, project); err != nil {
+		if isNotFound(err) {
+			return nil, newError("PROJECT_NOT_FOUND", "project '"+projectID+"' not found")
+		}
+		return nil, fmt.Errorf("get project: %w", err)
+	}
+
+	// 保存原始对象用于生成 strategic merge patch
+	original := project.DeepCopy()
+
+	changed, err := s.applyProjectPatch(project, req.Project)
+	if err != nil {
+		return nil, err
+	}
+
+	if !changed {
+		// 无实际变更，直接返回当前状态（幂等）
+		return s.toProjectResponse(project), nil
+	}
+
+	// 执行 K8s Patch（原子操作，仅发送变更字段）
+	if err := s.k8sClient.Patch(ctx, project, client.MergeFrom(original)); err != nil {
+		return nil, fmt.Errorf("patch project: %w", err)
+	}
+
+	s.log.Info("patched project", "projectID", projectID)
+
+	return s.toProjectResponse(project), nil
+}
+
+// applyProjectPatch 将 PATCH 请求中的变更应用到 Project CR Spec（内存中）。
+// 返回 changed=true 表示有实际变更需要持久化。
+func (s *apiService) applyProjectPatch(project *neonv1.Project, patch ProjectUpdatePayload) (changed bool, err error) {
+	spec := &project.Spec
+
+	// --- name: Upsert / Noop ---
+	if patch.Name != nil {
+		if len(*patch.Name) < 1 || len(*patch.Name) > 256 {
+			return false, newError("INVALID_NAME", "project name must be 1-256 characters")
+		}
+		spec.Name = *patch.Name
+		changed = true
+	}
+
+	// --- default_endpoint_settings: Upsert / Remove / Noop ---
+	if patch.DefaultEndpointSettings.IsUpsert() {
+		ds := patch.DefaultEndpointSettings.Value
+		if spec.DefaultEndpointSettings == nil {
+			spec.DefaultEndpointSettings = &neonv1.EndpointDefaults{}
+		}
+		if ds.Resources != nil {
+			spec.DefaultEndpointSettings.Resources = toResourceRequirements(ds.Resources)
+			changed = true
+		}
+	} else if patch.DefaultEndpointSettings.IsRemove() {
+		spec.DefaultEndpointSettings = nil
+		changed = true
+	}
+
+	// --- history_retention_seconds: Upsert / Noop ---
+	if patch.HistoryRetentionSeconds != nil {
+		if *patch.HistoryRetentionSeconds < 0 {
+			return false, newError("VALIDATION_ERROR", "history_retention_seconds must be >= 0")
+		}
+		spec.HistoryRetentionSeconds = *patch.HistoryRetentionSeconds
+		changed = true
+	}
+
+	// --- ip_allow: Upsert / Remove / Noop ---
+	if patch.IPAllow.IsUpsert() {
+		cfg := patch.IPAllow.Value
+		spec.IPAllow = &neonv1.IPAllowConfig{
+			PrimaryBranchOnly: cfg.PrimaryBranchOnly,
+			SourceRanges:      cfg.SourceRanges,
+		}
+		changed = true
+	} else if patch.IPAllow.IsRemove() {
+		spec.IPAllow = nil
+		changed = true
+	}
+
+	return changed, nil
+}
+
+// toProjectResponse 将 Project CR 转换为 API 响应。
+func (s *apiService) toProjectResponse(project *neonv1.Project) *ProjectResponse {
+	return &ProjectResponse{
+		ID:                      project.Name,
+		Name:                    project.Spec.Name,
+		PGVersion:               project.Spec.PGVersion,
+		Cluster:                 project.Spec.ClusterName,
+		TenantID:                project.Spec.TenantID,
+		CreatedAt:               project.CreationTimestamp.Time,
+		UpdatedAt:               now(),
+		DefaultSettings:         toDefaultSettings(project.Spec.DefaultEndpointSettings),
+		HistoryRetentionSeconds: project.Spec.HistoryRetentionSeconds,
+		IPAllow:                 toIPAllowResponse(project.Spec.IPAllow),
+	}
+}
+
+// toIPAllowResponse 将 CR 中的 IPAllowConfig 转换为 API 响应格式。
+func toIPAllowResponse(cfg *neonv1.IPAllowConfig) *IPAllowResp {
+	if cfg == nil {
+		return nil
+	}
+	return &IPAllowResp{
+		PrimaryBranchOnly: cfg.PrimaryBranchOnly,
+		SourceRanges:      cfg.SourceRanges,
+	}
 }
 
 // DeleteProject 删除项目
