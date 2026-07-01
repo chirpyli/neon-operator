@@ -271,7 +271,7 @@ func (r *ClusterReconciler) ensureComponentTokens(
 	log.Info("正在生成新的组件 JWT token 并持久化到 Secret")
 
 	var err error
-	tokens.pageserver, err = jm.GenerateScopeToken(cluster.Name, utils.ScopeAdmin, utils.TokenDefaultLifetime)
+	tokens.pageserver, err = jm.GenerateScopeToken(cluster.Name, utils.ScopePageServerAPI, utils.TokenDefaultLifetime)
 	if err != nil {
 		return nil, fmt.Errorf("generate pageserver token: %w", err)
 	}

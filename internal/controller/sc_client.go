@@ -454,14 +454,16 @@ func (c *SCClient) doRequestGet(ctx context.Context, namespace, clusterName, url
 }
 
 // DeleteTenant calls DELETE /v1/tenant/:tenant_id to delete a tenant from the
-// storage controller. Returns nil on 200 or 404 (idempotent).
+// storage controller. Returns nil on 200, 404 (already deleted), or 409
+// (unrecoverable conflict, e.g. no pageserver found — tenant was never
+// properly scheduled, so there is nothing to clean up).
 func (c *SCClient) DeleteTenant(ctx context.Context, clusterName, namespace, tenantID string) error {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/v1/tenant/%s", baseURL, tenantID)
 
 	err := c.doRequest(ctx, namespace, clusterName, http.MethodDelete, url, nil)
-	if err != nil && isSCNotFound(err) {
-		return nil // 404 = already deleted, idempotent success
+	if err != nil && (isSCNotFound(err) || isSCConflict(err)) {
+		return nil // 404/409 = idempotent success
 	}
 	return err
 }

@@ -390,7 +390,9 @@ func (r *ProjectReconciler) deleteTenant(ctx context.Context, clusterName, names
 
 	// 200: 删除成功
 	// 404: 已被删除（幂等）
-	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound {
+	// 409: 不可恢复（如 "No pageserver found matching constraint"），说明 tenant
+	//      从未被成功调度到 pageserver，无数据需要清理，直接视为删除完成。
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusConflict {
 		log.Info("Tenant 删除请求成功", "status", resp.StatusCode)
 		return nil
 	}
