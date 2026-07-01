@@ -138,12 +138,12 @@ func (s *apiService) CreateProject(ctx context.Context, req ProjectCreateRequest
 			},
 		},
 		Spec: neonv1.BranchSpec{
-			Name:        branchName,
-			ProjectID:   ids.ProjectID,
-			TimelineID:  ids.TimelineID,
-			PGVersion:   pgVersion,
-			InitSource:  "parent-data",
-			Default:     true,
+			Name:       branchName,
+			ProjectID:  ids.ProjectID,
+			TimelineID: ids.TimelineID,
+			PGVersion:  pgVersion,
+			InitSource: "parent-data",
+			Default:    true,
 		},
 	}
 	if err := s.k8sClient.Create(ctx, branch); err != nil {

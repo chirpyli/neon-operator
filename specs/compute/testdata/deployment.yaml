@@ -65,11 +65,32 @@ spec:
               - fast
               - -t
               - "25"
+        livenessProbe:
+          failureThreshold: 3
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          tcpSocket:
+            port: 55433
+          timeoutSeconds: 5
         name: compute-node
         ports:
         - containerPort: 55433
           protocol: TCP
+        readinessProbe:
+          failureThreshold: 2
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          tcpSocket:
+            port: 55433
+          timeoutSeconds: 3
         resources: {}
+        startupProbe:
+          failureThreshold: 30
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          tcpSocket:
+            port: 55433
+          timeoutSeconds: 5
         volumeMounts:
         - mountPath: /var
           name: spec-volume

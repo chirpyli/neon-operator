@@ -10,7 +10,11 @@ import (
 	"k8s.io/utils/ptr"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
+	"oltp.molnett.org/neon-operator/utils"
 )
+
+// computePort is the PostgreSQL port for the compute node.
+const computePort = 55433
 
 func Deployment(branch *neonv1alpha1.Branch, project *neonv1alpha1.Project, image string) *appsv1.Deployment {
 	if image == "" {
@@ -97,6 +101,16 @@ func Deployment(branch *neonv1alpha1.Branch, project *neonv1alpha1.Project, imag
 									Protocol:      corev1.ProtocolTCP,
 								},
 							},
+							// Phase A: TCP Socket health probes.
+							// PostgreSQL only binds its port after full initialization,
+							// so a tcpSocket probe reliably signals readiness.
+							// Will be upgraded to HTTP probes once JWT auth is deployed.
+							// - Startup: ~300s window (PG cold start / recovery)
+							// - Liveness: ~25s window
+							// - Readiness: ~8s window
+							StartupProbe:   utils.TCPProbe(computePort, 5, 10, 5, 30, nil),
+							LivenessProbe:  utils.TCPProbe(computePort, 10, 10, 5, 3, nil),
+							ReadinessProbe: utils.TCPProbe(computePort, 5, 5, 3, 2, nil),
 							VolumeMounts: []corev1.VolumeMount{
 								{
 									Name:      "spec-volume",

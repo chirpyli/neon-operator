@@ -122,6 +122,32 @@ type ClusterSpec struct {
 	// 不设置时默认为 ClusterIP（仅集群内访问）。
 	// +optional
 	PostgresExposure *ServiceExposure `json:"postgresExposure,omitempty"`
+
+	// StorageControllerProbes overrides the default health probe
+	// configuration for the Storage Controller Deployment.
+	// +optional
+	StorageControllerProbes *ClusterComponentProbes `json:"storageControllerProbes,omitempty"`
+
+	// StorageBrokerProbes overrides the default health probe
+	// configuration for the Storage Broker Deployment.
+	// +optional
+	StorageBrokerProbes *ClusterComponentProbes `json:"storageBrokerProbes,omitempty"`
+}
+
+// ClusterComponentProbes groups probe configurations for a cluster-scoped
+// component (Storage Controller, Storage Broker).
+type ClusterComponentProbes struct {
+	// LivenessProbe overrides the default liveness probe configuration.
+	// +optional
+	LivenessProbe *ProbeConfig `json:"livenessProbe,omitempty"`
+
+	// ReadinessProbe overrides the default readiness probe configuration.
+	// +optional
+	ReadinessProbe *ProbeConfig `json:"readinessProbe,omitempty"`
+
+	// StartupProbe overrides the default startup probe configuration.
+	// +optional
+	StartupProbe *ProbeConfig `json:"startupProbe,omitempty"`
 }
 
 // ClusterStatus defines the observed state of Cluster.

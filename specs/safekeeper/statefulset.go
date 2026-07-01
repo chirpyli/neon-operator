@@ -8,11 +8,11 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 
 	"oltp.molnett.org/neon-operator/api/v1alpha1"
 	"oltp.molnett.org/neon-operator/specs/storagebroker"
+	"oltp.molnett.org/neon-operator/utils"
 )
 
 const storageVolumeName = "safekeeper-storage"
@@ -119,9 +119,9 @@ func podSpec(sk *v1alpha1.Safekeeper, image string) corev1.PodSpec {
 				// - Liveness: ~30s detection window → matches max_offline_interval=30s
 				// - Readiness: 5s period → matches heartbeat_interval=5s
 				// - Startup:  60s window → Safekeeper starts fast (no cold-start from S3)
-				LivenessProbe:  probeWithConfig("/v1/status", 7676, 10, 10, 5, 3, sk.Spec.LivenessProbe),
-				ReadinessProbe: probeWithConfig("/v1/status", 7676, 5, 5, 3, 2, sk.Spec.ReadinessProbe),
-				StartupProbe:   probeWithConfig("/v1/status", 7676, 5, 5, 5, 12, sk.Spec.StartupProbe),
+				LivenessProbe:  utils.ProbeWithConfig("/v1/status", 7676, corev1.URISchemeHTTP, 10, 10, 5, 3, sk.Spec.LivenessProbe),
+				ReadinessProbe: utils.ProbeWithConfig("/v1/status", 7676, corev1.URISchemeHTTP, 5, 5, 3, 2, sk.Spec.ReadinessProbe),
+				StartupProbe:   utils.ProbeWithConfig("/v1/status", 7676, corev1.URISchemeHTTP, 5, 5, 5, 12, sk.Spec.StartupProbe),
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{
 						corev1.ResourceCPU:    resource.MustParse("500m"),
@@ -135,39 +135,4 @@ func podSpec(sk *v1alpha1.Safekeeper, image string) corev1.PodSpec {
 			},
 		},
 	}
-}
-
-// probeWithConfig builds a *corev1.Probe using the given defaults, then
-// applies any overrides from cfg. The path, port, and scheme are fixed
-// because they correspond to upstream Neon's API design.
-func probeWithConfig(path string, port int, initialDelay, period, timeout, failure int32, cfg *v1alpha1.ProbeConfig) *corev1.Probe {
-	probe := &corev1.Probe{
-		ProbeHandler: corev1.ProbeHandler{
-			HTTPGet: &corev1.HTTPGetAction{
-				Path:   path,
-				Port:   intstr.FromInt(port),
-				Scheme: corev1.URISchemeHTTP,
-			},
-		},
-		InitialDelaySeconds: initialDelay,
-		PeriodSeconds:       period,
-		TimeoutSeconds:      timeout,
-		FailureThreshold:    failure,
-	}
-	if cfg == nil {
-		return probe
-	}
-	if cfg.InitialDelaySeconds != nil {
-		probe.InitialDelaySeconds = *cfg.InitialDelaySeconds
-	}
-	if cfg.PeriodSeconds != nil {
-		probe.PeriodSeconds = *cfg.PeriodSeconds
-	}
-	if cfg.TimeoutSeconds != nil {
-		probe.TimeoutSeconds = *cfg.TimeoutSeconds
-	}
-	if cfg.FailureThreshold != nil {
-		probe.FailureThreshold = *cfg.FailureThreshold
-	}
-	return probe
 }

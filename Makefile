@@ -1,5 +1,9 @@
+# Version for the operator image. Defaults to git describe, override with:
+#   make docker-build VERSION=v0.2.0
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+
 # Image URL to use for building/pushing the operator image
-IMG_OPERATOR ?= neon-operator:latest
+IMG_OPERATOR ?= neon-operator:$(VERSION)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -199,6 +203,10 @@ uninstall: manifests kustomize ## Uninstall CRDs from the K8s cluster specified 
 deploy: manifests kustomize ## Deploy controller to the K8s cluster specified in ~/.kube/config.
 	cd config/manager && $(KUSTOMIZE) edit set image controller=${IMG_OPERATOR}
 	$(KUSTOMIZE) build config/default | $(KUBECTL) apply -f -
+
+.PHONY: release
+release: docker-build docker-push deploy ## Build, push, and deploy the operator (one-step). Usage: make release IMG_OPERATOR=<registry>/neon-operator:v0.1.0
+	@echo "Release complete: ${IMG_OPERATOR} deployed."
 
 .PHONY: undeploy
 undeploy: kustomize ## Undeploy controller from the K8s cluster specified in ~/.kube/config. Call with ignore-not-found=true to ignore resource not found errors during deletion.

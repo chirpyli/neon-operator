@@ -7,11 +7,21 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+
 	"oltp.molnett.org/neon-operator/api/v1alpha1"
+	"oltp.molnett.org/neon-operator/utils"
 )
 
 func Deployment(cluster *v1alpha1.Cluster) *appsv1.Deployment {
 	storageBrokerName := Name(cluster.Name)
+
+	probes := cluster.Spec.StorageBrokerProbes
+	var startupCfg, livenessCfg, readinessCfg *v1alpha1.ProbeConfig
+	if probes != nil {
+		startupCfg = probes.StartupProbe
+		livenessCfg = probes.LivenessProbe
+		readinessCfg = probes.ReadinessProbe
+	}
 
 	return &appsv1.Deployment{
 		TypeMeta: metav1.TypeMeta{
@@ -56,6 +66,11 @@ func Deployment(cluster *v1alpha1.Cluster) *appsv1.Deployment {
 									ContainerPort: Port,
 								},
 							},
+							// Health probes using /status (HTTP/1 handler).
+							// Broker is a stateless pub-sub service; starts fast (<10s).
+							StartupProbe:   utils.ProbeWithConfig("/status", Port, corev1.URISchemeHTTP, 5, 5, 5, 6, startupCfg),
+							LivenessProbe:  utils.ProbeWithConfig("/status", Port, corev1.URISchemeHTTP, 10, 10, 5, 3, livenessCfg),
+							ReadinessProbe: utils.ProbeWithConfig("/status", Port, corev1.URISchemeHTTP, 5, 5, 3, 2, readinessCfg),
 						},
 					},
 				},

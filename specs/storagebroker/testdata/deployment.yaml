@@ -25,9 +25,36 @@ spec:
         - storage_broker
         image: neondatabase/neon:8463
         imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /status
+            port: 50051
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
         name: storage-broker
         ports:
         - containerPort: 50051
           name: http
+        readinessProbe:
+          failureThreshold: 2
+          httpGet:
+            path: /status
+            port: 50051
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
         resources: {}
+        startupProbe:
+          failureThreshold: 6
+          httpGet:
+            path: /status
+            port: 50051
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 5
 status: {}

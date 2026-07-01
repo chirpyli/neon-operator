@@ -241,6 +241,93 @@ spec:
                     - LoadBalancer
                     type: string
                 type: object
+              storageBrokerProbes:
+                description: |-
+                  StorageBrokerProbes overrides the default health probe
+                  configuration for the Storage Broker Deployment.
+                properties:
+                  livenessProbe:
+                    description: LivenessProbe overrides the default liveness probe
+                      configuration.
+                    properties:
+                      failureThreshold:
+                        description: |-
+                          FailureThreshold is the number of consecutive failures required to
+                          consider the probe failed.
+                        format: int32
+                        type: integer
+                      initialDelaySeconds:
+                        description: |-
+                          InitialDelaySeconds is the number of seconds after the container has
+                          started before the probe is initiated. Overrides the operator default.
+                        format: int32
+                        type: integer
+                      periodSeconds:
+                        description: PeriodSeconds is how often (in seconds) to perform
+                          the probe.
+                        format: int32
+                        type: integer
+                      timeoutSeconds:
+                        description: TimeoutSeconds is the number of seconds after
+                          which the probe times out.
+                        format: int32
+                        type: integer
+                    type: object
+                  readinessProbe:
+                    description: ReadinessProbe overrides the default readiness probe
+                      configuration.
+                    properties:
+                      failureThreshold:
+                        description: |-
+                          FailureThreshold is the number of consecutive failures required to
+                          consider the probe failed.
+                        format: int32
+                        type: integer
+                      initialDelaySeconds:
+                        description: |-
+                          InitialDelaySeconds is the number of seconds after the container has
+                          started before the probe is initiated. Overrides the operator default.
+                        format: int32
+                        type: integer
+                      periodSeconds:
+                        description: PeriodSeconds is how often (in seconds) to perform
+                          the probe.
+                        format: int32
+                        type: integer
+                      timeoutSeconds:
+                        description: TimeoutSeconds is the number of seconds after
+                          which the probe times out.
+                        format: int32
+                        type: integer
+                    type: object
+                  startupProbe:
+                    description: StartupProbe overrides the default startup probe
+                      configuration.
+                    properties:
+                      failureThreshold:
+                        description: |-
+                          FailureThreshold is the number of consecutive failures required to
+                          consider the probe failed.
+                        format: int32
+                        type: integer
+                      initialDelaySeconds:
+                        description: |-
+                          InitialDelaySeconds is the number of seconds after the container has
+                          started before the probe is initiated. Overrides the operator default.
+                        format: int32
+                        type: integer
+                      periodSeconds:
+                        description: PeriodSeconds is how often (in seconds) to perform
+                          the probe.
+                        format: int32
+                        type: integer
+                      timeoutSeconds:
+                        description: TimeoutSeconds is the number of seconds after
+                          which the probe times out.
+                        format: int32
+                        type: integer
+                    type: object
+                type: object
               storageControllerDatabaseSecret:
                 description: |-
                   Reference to a Secret containing credentials for accessing a storage bucket.
@@ -266,6 +353,93 @@ spec:
                 - key
                 type: object
                 x-kubernetes-map-type: atomic
+              storageControllerProbes:
+                description: |-
+                  StorageControllerProbes overrides the default health probe
+                  configuration for the Storage Controller Deployment.
+                properties:
+                  livenessProbe:
+                    description: LivenessProbe overrides the default liveness probe
+                      configuration.
+                    properties:
+                      failureThreshold:
+                        description: |-
+                          FailureThreshold is the number of consecutive failures required to
+                          consider the probe failed.
+                        format: int32
+                        type: integer
+                      initialDelaySeconds:
+                        description: |-
+                          InitialDelaySeconds is the number of seconds after the container has
+                          started before the probe is initiated. Overrides the operator default.
+                        format: int32
+                        type: integer
+                      periodSeconds:
+                        description: PeriodSeconds is how often (in seconds) to perform
+                          the probe.
+                        format: int32
+                        type: integer
+                      timeoutSeconds:
+                        description: TimeoutSeconds is the number of seconds after
+                          which the probe times out.
+                        format: int32
+                        type: integer
+                    type: object
+                  readinessProbe:
+                    description: ReadinessProbe overrides the default readiness probe
+                      configuration.
+                    properties:
+                      failureThreshold:
+                        description: |-
+                          FailureThreshold is the number of consecutive failures required to
+                          consider the probe failed.
+                        format: int32
+                        type: integer
+                      initialDelaySeconds:
+                        description: |-
+                          InitialDelaySeconds is the number of seconds after the container has
+                          started before the probe is initiated. Overrides the operator default.
+                        format: int32
+                        type: integer
+                      periodSeconds:
+                        description: PeriodSeconds is how often (in seconds) to perform
+                          the probe.
+                        format: int32
+                        type: integer
+                      timeoutSeconds:
+                        description: TimeoutSeconds is the number of seconds after
+                          which the probe times out.
+                        format: int32
+                        type: integer
+                    type: object
+                  startupProbe:
+                    description: StartupProbe overrides the default startup probe
+                      configuration.
+                    properties:
+                      failureThreshold:
+                        description: |-
+                          FailureThreshold is the number of consecutive failures required to
+                          consider the probe failed.
+                        format: int32
+                        type: integer
+                      initialDelaySeconds:
+                        description: |-
+                          InitialDelaySeconds is the number of seconds after the container has
+                          started before the probe is initiated. Overrides the operator default.
+                        format: int32
+                        type: integer
+                      periodSeconds:
+                        description: PeriodSeconds is how often (in seconds) to perform
+                          the probe.
+                        format: int32
+                        type: integer
+                      timeoutSeconds:
+                        description: TimeoutSeconds is the number of seconds after
+                          which the probe times out.
+                        format: int32
+                        type: integer
+                    type: object
+                type: object
             required:
             - bucketCredentialsSecret
             - defaultPGVersion
