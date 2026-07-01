@@ -58,6 +58,12 @@ spec:
           spec:
             description: spec defines the desired state of Pageserver
             properties:
+              availabilityZone:
+                description: |-
+                  AvailabilityZone 指定 pageserver 注册到 SC 时声明的可用区。
+                  该值写入 metadata.json，SC 调度器据此做 AZ 感知的 shard 放置决策。
+                  若未设置，默认使用 "se-ume"。
+                type: string
               bucketCredentialsSecret:
                 description: Reference to a Secret containing credentials for accessing
                   a storage bucket.

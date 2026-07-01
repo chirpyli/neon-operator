@@ -96,9 +96,11 @@ func (r *PageserverReconciler) ensurePSAuthTokens(ctx context.Context, ps *neonv
 	secretName := utils.JWTSecretName(ps.Spec.Cluster)
 	var secret corev1.Secret
 	if err := r.Get(ctx, types.NamespacedName{Name: secretName, Namespace: ps.Namespace}, &secret); err != nil {
-		log.Info("JWT Secret 尚未就绪，等下次 reconcile 重试",
-			"secret", secretName, "error", err)
-		return "", "", nil
+		// JWT Secret 尚未就绪：返回错误触发 retry，而非用空 token 创建无法认证的 pageserver。
+		// 若此时创建不含 control_plane_api_token 的 ConfigMap，PS 启动后调用
+		// /upcall/v1/re-attach 会因缺少 Authorization header 被 SC 拒绝 (401)，
+		// 导致 PS 永远无法注册到 SC，进而所有 tenant 操作返回 409。
+		return "", "", fmt.Errorf("JWT Secret %s 尚未就绪: %w", secretName, err)
 	}
 
 	// 从 Secret 中读取已持久化的 token
@@ -114,16 +116,14 @@ func (r *PageserverReconciler) ensurePSAuthTokens(ctx context.Context, ps *neonv
 
 	jm, err := utils.NewJWTManagerFromSecret(&secret)
 	if err != nil {
-		log.Error(err, "从 Secret 创建 JWT manager 失败", "secret", secretName)
-		return "", "", nil
+		return "", "", fmt.Errorf("从 Secret %s 创建 JWT manager 失败: %w", secretName, err)
 	}
 
 	// 生成 control_plane_api_token（generations_api scope）
 	if controlPlaneAPIToken == "" {
 		controlPlaneAPIToken, err = utils.GenerateUpcallToken(jm, ps.Spec.Cluster)
 		if err != nil {
-			log.Error(err, "生成 control_plane_api_token 失败")
-			return "", "", nil
+			return "", "", fmt.Errorf("生成 control_plane_api_token 失败: %w", err)
 		}
 	}
 
@@ -131,8 +131,7 @@ func (r *PageserverReconciler) ensurePSAuthTokens(ctx context.Context, ps *neonv
 	if safekeeperAuthToken == "" {
 		safekeeperAuthToken, err = utils.GenerateSafekeeperToken(jm, ps.Spec.Cluster)
 		if err != nil {
-			log.Error(err, "生成 safekeeper auth token 失败")
-			return "", "", nil
+			return "", "", fmt.Errorf("生成 safekeeper auth token 失败: %w", err)
 		}
 	}
 

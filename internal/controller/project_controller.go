@@ -238,7 +238,15 @@ func (r *ProjectReconciler) ensureTenantOnPageserver(ctx context.Context, projec
 		err := r.ScClient.CreateTenant(ctx, project.Spec.ClusterName, project.Namespace,
 			project.Spec.TenantID, "AttachedSingle", 1)
 		if err != nil {
-			log.Info("Storage controller returned error", "error", err)
+			// 409 Conflict 意味着 SC 调度器找不到可用的 pageserver。
+			// 这通常是瞬时状态：PS 正在 WarmUp（从 S3 恢复数据）或尚未完成 re-attach。
+			// 区别于网络不可达等硬错误，使用不同级别日志帮助排查。
+			if isSCConflict(err) {
+				log.Info("Storage controller 无可调度 pageserver (409)，可能是 PS 正在预热或尚未注册，等待重试",
+					"error", err)
+			} else {
+				log.Info("Storage controller returned error", "error", err)
+			}
 			return err
 		}
 		log.Info("Successfully created tenant on storage controller")
@@ -338,6 +346,7 @@ func (r *ProjectReconciler) finalize(ctx context.Context, project *neonv1alpha1.
 
 // deleteTenant 向 Storage Controller 发送 DELETE 请求以删除 tenant，携带 JWT 认证。
 // 将 404 视为成功（幂等性保证）。
+// 409 视为瞬时冲突（SC 内部状态未就绪），返回错误触发 caller 重试。
 // namespace 用于读取 JWT 密钥 Secret。
 func (r *ProjectReconciler) deleteTenant(ctx context.Context, clusterName, namespace, tenantID string) error {
 	log := logf.FromContext(ctx)
@@ -346,7 +355,12 @@ func (r *ProjectReconciler) deleteTenant(ctx context.Context, clusterName, names
 
 	// 优先使用带 JWT 认证的 SCClient
 	if r.ScClient != nil {
-		return r.ScClient.DeleteTenant(ctx, clusterName, namespace, tenantID)
+		err := r.ScClient.DeleteTenant(ctx, clusterName, namespace, tenantID)
+		if err != nil && isSCConflict(err) {
+			log.Info("Storage Controller 删除 tenant 返回 409（瞬时冲突），将重试",
+				"tenantID", tenantID, "error", err)
+		}
+		return err
 	}
 
 	// 兜底：无 ScClient 时使用裸 HTTP（测试等场景）

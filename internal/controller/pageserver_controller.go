@@ -326,7 +326,8 @@ func (r *PageserverReconciler) monitorDrainProgress(ctx context.Context, ps *neo
 }
 
 // syncSCState 从 Storage Controller 查询节点状态并同步到 Pageserver Status。
-// 这是一个尽力而为的操作；如果 SC 不可达，仅记录日志。
+// 这是一个尽力而为的操作；如果 SC 不可达，设置 RegisteredWithSC = false 并
+// 在 Condition 中记录原因，便于用户通过 kubectl describe 诊断。
 func (r *PageserverReconciler) syncSCState(ctx context.Context, ps *neonv1alpha1.Pageserver) {
 	log := logf.FromContext(ctx)
 
@@ -343,6 +344,9 @@ func (r *PageserverReconciler) syncSCState(ctx context.Context, ps *neonv1alpha1
 		// SC 尚未注册或不可达，记录状态未知
 		_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
 			p.Status.RegisteredWithSC = false
+			utils.SetCondition(p, p.StatusConditions(), utils.ConditionRegisteredWithSC,
+				metav1.ConditionFalse, utils.ReasonReconciling,
+				fmt.Sprintf("等待 PS 注册到 SC (节点 %d): %v", nodeID, err))
 		})
 		log.Info("无法获取 SC 节点状态，可能尚未注册", "error", err)
 		return

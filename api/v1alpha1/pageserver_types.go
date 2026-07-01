@@ -78,6 +78,12 @@ type PageserverSpec struct {
 	// +optional
 	Resources *corev1.ResourceRequirements `json:"resources,omitempty"`
 
+	// AvailabilityZone 指定 pageserver 注册到 SC 时声明的可用区。
+	// 该值写入 metadata.json，SC 调度器据此做 AZ 感知的 shard 放置决策。
+	// 若未设置，默认使用 "se-ume"。
+	// +optional
+	AvailabilityZone string `json:"availabilityZone,omitempty"`
+
 	// InitialSchedulingPolicy 新节点注册后的初始 SC 调度策略。
 	// "Active"（默认）：立即参与全量调度。
 	// "Filling"：仅接收新 shard placement（用于新节点预热）。

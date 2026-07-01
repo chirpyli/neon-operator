@@ -20,10 +20,13 @@ const initScript = `echo "id=%d" > /config/identity.toml
 echo "{\"host\":\"%s.%s\"," \
      "\"http_host\":\"%s.%s\"," \
      "\"http_port\":9898,\"port\":6400," \
-     "\"availability_zone_id\":\"se-ume\"}" > /config/metadata.json
+     "\"availability_zone_id\":\"%s\"}" > /config/metadata.json
 
 cp /configmap/pageserver.toml /config/pageserver.toml
 `
+
+// defaultAvailabilityZone 是未在 PageserverSpec 中显式指定时的默认可用区。
+const defaultAvailabilityZone = "se-ume"
 
 // DefaultResources are the default CPU/memory requests and limits for pageserver.
 var DefaultResources = corev1.ResourceRequirements{
@@ -84,6 +87,15 @@ func StatefulSet(ps *v1alpha1.Pageserver, image string, safekeeperAuthToken stri
 	}
 }
 
+// availabilityZone returns the AZ to advertise for this pageserver.
+// If the spec has an explicit AZ, use it; otherwise fall back to the default.
+func availabilityZone(ps *v1alpha1.Pageserver) string {
+	if ps.Spec.AvailabilityZone != "" {
+		return ps.Spec.AvailabilityZone
+	}
+	return defaultAvailabilityZone
+}
+
 func podSpec(ps *v1alpha1.Pageserver, image, serviceName, safekeeperAuthToken string) corev1.PodSpec {
 	var envVars []corev1.EnvVar
 	envVars = append(envVars,
@@ -135,7 +147,8 @@ func podSpec(ps *v1alpha1.Pageserver, image, serviceName, safekeeperAuthToken st
 					fmt.Sprintf(initScript,
 						ps.Spec.ID,
 						serviceName, ps.Namespace,
-						serviceName, ps.Namespace),
+						serviceName, ps.Namespace,
+						availabilityZone(ps)),
 				},
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: "pageserver-config", MountPath: "/configmap"},
