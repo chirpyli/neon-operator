@@ -197,6 +197,14 @@ func EndpointConfigMap(
 		return nil, err
 	}
 
+	// 生成 safekeeper WAL 端口 JWT 认证 token。
+	// Safekeeper 通过 --pg-auth-public-key-path 要求所有 WAL 连接（端口 5454）
+	// 提供有效的 JWT token，walproposer 通过 neon.safekeepers_auth_token GUC 使用此 token。
+	safekeeperAuthToken, err := utils.GenerateSafekeeperToken(jwtManager, project.Spec.ClusterName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate safekeeper auth token: %w", err)
+	}
+
 	jwk := jwtManager.ToJWK()
 
 	type clusterConfig struct {
@@ -233,6 +241,11 @@ func EndpointConfigMap(
 			Settings: []SettingsEntry{
 				{Name: "neon.tenant_id", Value: project.Spec.TenantID, Vartype: "string"},
 				{Name: "neon.timeline_id", Value: branch.Spec.TimelineID, Vartype: "string"},
+				{
+					Name:    "neon.safekeepers_auth_token",
+					Value:   safekeeperAuthToken,
+					Vartype: "string",
+				},
 			},
 		},
 	}

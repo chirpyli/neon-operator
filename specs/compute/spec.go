@@ -371,10 +371,29 @@ func GenerateComputeSpec(
 	readOnly := endpointType == "read_only"
 	log.Info("Compute endpoint type", "type", endpointType, "readOnly", readOnly)
 
-	// 6. Build postgres settings
-	settings := buildPostgresSettings(clusterName, safekeeperIDs, project.Spec.TenantID, branch.Spec.TimelineID, readOnly)
+	// 6. 生成 safekeeper WAL 端口 JWT 认证 token（scope=safekeeperdata）
+	// 直接读取 JWT Secret 获取私钥签发 token
+	var safekeeperAuthToken string
+	jwtSecretName := fmt.Sprintf("cluster-%s-jwt", clusterName)
+	jwtSecret := &corev1.Secret{}
+	if err := k8sClient.Get(ctx, types.NamespacedName{Name: jwtSecretName, Namespace: "neon"}, jwtSecret); err != nil {
+		log.Warn("Failed to get JWT secret, safekeeper auth token will be empty", "error", err)
+	} else {
+		jwtMgr, err := utils.NewJWTManagerFromSecret(jwtSecret)
+		if err != nil {
+			log.Warn("Failed to create JWT manager, safekeeper auth token will be empty", "error", err)
+		} else {
+			safekeeperAuthToken, err = utils.GenerateSafekeeperToken(jwtMgr, clusterName)
+			if err != nil {
+				log.Warn("Failed to generate safekeeper auth token", "error", err)
+			}
+		}
+	}
 
-	// 7. Generate spec
+	// 7. Build postgres settings
+	settings := buildPostgresSettings(clusterName, safekeeperIDs, project.Spec.TenantID, branch.Spec.TimelineID, safekeeperAuthToken, readOnly)
+
+	// 8. Generate spec
 	shards := make(map[string]PageserverShardInfo)
 
 	var actualRequest *ComputeHookNotifyRequest
@@ -688,7 +707,7 @@ func getJWTKeysFromSecret(
 	}, nil
 }
 
-func buildPostgresSettings(clusterName string, safekeeperIDs []uint32, tenantID, timelineID string, readOnly bool) []SettingsEntry {
+func buildPostgresSettings(clusterName string, safekeeperIDs []uint32, tenantID, timelineID, safekeeperAuthToken string, readOnly bool) []SettingsEntry {
 	skParts := make([]string, len(safekeeperIDs))
 	for i, id := range safekeeperIDs {
 		skParts[i] = fmt.Sprintf("%s-safekeeper-%d.neon:5454", clusterName, id)
@@ -718,6 +737,15 @@ func buildPostgresSettings(clusterName string, safekeeperIDs []uint32, tenantID,
 		{Name: "neon.timeline_id", Value: timelineID, Vartype: "string"},
 		{Name: "neon.tenant_id", Value: tenantID, Vartype: "string"},
 		{Name: "neon.max_file_cache_size", Value: "1GB", Vartype: "string"},
+	}
+
+	// Safekeeper WAL 端口 JWT 认证 token。
+	// Safekeeper 通过 --pg-auth-public-key-path 要求所有 WAL 连接（端口 5454）
+	// 提供有效 JWT token（scope=safekeeperdata），walproposer 通过此 GUC 使用。
+	if safekeeperAuthToken != "" {
+		entries = append(entries, SettingsEntry{
+			Name: "neon.safekeepers_auth_token", Value: safekeeperAuthToken, Vartype: "string",
+		})
 	}
 
 	// Only read_write endpoints act as WAL proposers.

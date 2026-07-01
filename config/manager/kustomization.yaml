@@ -5,4 +5,4 @@ kind: Kustomization
 images:
 - name: controller
   newName: 192.168.232.128:5000/neon/neon-operator
-  newTag: e0ad0d5-dirty
+  newTag: a5a760e-dirty
