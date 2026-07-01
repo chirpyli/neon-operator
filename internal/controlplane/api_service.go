@@ -138,11 +138,12 @@ func (s *apiService) CreateProject(ctx context.Context, req ProjectCreateRequest
 			},
 		},
 		Spec: neonv1.BranchSpec{
-			ProjectID:  ids.ProjectID,
-			TimelineID: ids.TimelineID,
-			PGVersion:  pgVersion,
-			InitSource: "parent-data",
-			Default:    true,
+			Name:        branchName,
+			ProjectID:   ids.ProjectID,
+			TimelineID:  ids.TimelineID,
+			PGVersion:   pgVersion,
+			InitSource:  "parent-data",
+			Default:     true,
 		},
 	}
 	if err := s.k8sClient.Create(ctx, branch); err != nil {
@@ -593,6 +594,7 @@ func (s *apiService) CreateBranch(ctx context.Context, projectID string, req Bra
 			},
 		},
 		Spec: neonv1.BranchSpec{
+			Name:            branchName,
 			ProjectID:       projectID,
 			TimelineID:      timelineID,
 			PGVersion:       project.Spec.PGVersion,
@@ -675,7 +677,7 @@ func (s *apiService) GetBranch(ctx context.Context, projectID, branchID string) 
 
 	return &BranchResponse{
 		ID:           branch.Name,
-		Name:         branch.Spec.ParentBranch, // 使用 parent 作为 name（metadata.name 是 ID）
+		Name:         branch.Spec.Name,
 		ProjectID:    projectID,
 		ParentID:     branch.Spec.ParentBranch,
 		ParentLSN:    branch.Spec.ParentLSN,
@@ -701,7 +703,7 @@ func (s *apiService) ListBranches(ctx context.Context, projectID string) (*Branc
 		}
 		branches = append(branches, BranchResponse{
 			ID:           b.Name,
-			Name:         b.Spec.ParentBranch,
+			Name:         b.Spec.Name,
 			ProjectID:    projectID,
 			ParentID:     b.Spec.ParentBranch,
 			CurrentState: "ready",
@@ -767,6 +769,110 @@ func (s *apiService) DeleteBranch(ctx context.Context, projectID, branchID strin
 			CreatedAt: now(),
 		}},
 	}, nil
+}
+
+// UpdateBranch 部分更新分支（对标 Neon PATCH /api/v2/projects/{project_id}/branches/{branch_id}）。
+func (s *apiService) UpdateBranch(ctx context.Context, projectID, branchID string, req BranchUpdateRequest) (*BranchResponse, error) {
+	branch := &neonv1.Branch{}
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: branchID, Namespace: s.namespace}, branch); err != nil {
+		if isNotFound(err) {
+			return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not found")
+		}
+		return nil, fmt.Errorf("get branch: %w", err)
+	}
+	if branch.Spec.ProjectID != projectID {
+		return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not in project '"+projectID+"'")
+	}
+
+	original := branch.DeepCopy()
+	changed := false
+
+	if req.Branch.Name != nil {
+		n := *req.Branch.Name
+		if len(n) < 1 || len(n) > 256 {
+			return nil, newError("INVALID_NAME", "branch name must be 1-256 characters")
+		}
+		branch.Spec.Name = n
+		changed = true
+	}
+	if req.Branch.Protected != nil {
+		if branch.Spec.Protected && !*req.Branch.Protected {
+			return nil, newError("PROTECTED_BRANCH", "cannot unprotect a protected branch")
+		}
+		branch.Spec.Protected = *req.Branch.Protected
+		changed = true
+	}
+
+	if !changed {
+		return s.toBranchResponse(branch, projectID), nil
+	}
+
+	if err := s.k8sClient.Patch(ctx, branch, client.MergeFrom(original)); err != nil {
+		return nil, fmt.Errorf("patch branch: %w", err)
+	}
+	s.log.Info("patched branch", "branchID", branchID)
+
+	return s.toBranchResponse(branch, projectID), nil
+}
+
+// SetBranchAsDefault 设置分支为项目默认分支。
+func (s *apiService) SetBranchAsDefault(ctx context.Context, projectID, branchID string) (*BranchResponse, error) {
+	branch := &neonv1.Branch{}
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: branchID, Namespace: s.namespace}, branch); err != nil {
+		if isNotFound(err) {
+			return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not found")
+		}
+		return nil, fmt.Errorf("get branch: %w", err)
+	}
+	if branch.Spec.ProjectID != projectID {
+		return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not in project '"+projectID+"'")
+	}
+
+	// 幂等：已经是默认分支
+	if branch.Spec.Default {
+		return s.toBranchResponse(branch, projectID), nil
+	}
+
+	// 1. 列出同项目所有分支，设置 default=false
+	branchList := &neonv1.BranchList{}
+	if err := s.k8sClient.List(ctx, branchList, client.InNamespace(s.namespace)); err != nil {
+		return nil, fmt.Errorf("list branches: %w", err)
+	}
+	for _, b := range branchList.Items {
+		if b.Spec.ProjectID == projectID && b.Spec.Default {
+			orig := b.DeepCopy()
+			b.Spec.Default = false
+			if err := s.k8sClient.Patch(ctx, &b, client.MergeFrom(orig)); err != nil {
+				s.log.Warn("failed to unset default on branch", "branchID", b.Name, "error", err)
+			}
+		}
+	}
+
+	// 2. 设置目标分支 default=true
+	original := branch.DeepCopy()
+	branch.Spec.Default = true
+	if err := s.k8sClient.Patch(ctx, branch, client.MergeFrom(original)); err != nil {
+		return nil, fmt.Errorf("set branch as default: %w", err)
+	}
+
+	s.log.Info("set branch as default", "branchID", branchID)
+	return s.toBranchResponse(branch, projectID), nil
+}
+
+// toBranchResponse converts a Branch CR to API response.
+func (s *apiService) toBranchResponse(branch *neonv1.Branch, projectID string) *BranchResponse {
+	return &BranchResponse{
+		ID:           branch.Name,
+		Name:         branch.Spec.Name,
+		ProjectID:    projectID,
+		ParentID:     branch.Spec.ParentBranch,
+		ParentLSN:    branch.Spec.ParentLSN,
+		CurrentState: "ready",
+		Default:      branch.Spec.Default,
+		Protected:    branch.Spec.Protected,
+		InitSource:   branch.Spec.InitSource,
+		CreatedAt:    branch.CreationTimestamp.Time,
+	}
 }
 
 // =============================================================================
@@ -999,6 +1105,273 @@ func (s *apiService) DeleteEndpoint(ctx context.Context, projectID, endpointID s
 	}, nil
 }
 
+// UpdateEndpoint 部分更新端点（对标 Neon PATCH）。
+func (s *apiService) UpdateEndpoint(ctx context.Context, projectID, endpointID string, req EndpointUpdateRequest) (*EndpointGetResponse, error) {
+	endpoint := &neonv1.Endpoint{}
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: endpointID, Namespace: s.namespace}, endpoint); err != nil {
+		if isNotFound(err) {
+			return nil, newError("ENDPOINT_NOT_FOUND", "endpoint '"+endpointID+"' not found")
+		}
+		return nil, fmt.Errorf("get endpoint: %w", err)
+	}
+
+	original := endpoint.DeepCopy()
+	changed := false
+
+	// --- BranchID 变更（迁移端点）---
+	if req.Endpoint.BranchID != nil {
+		newBranchID := *req.Endpoint.BranchID
+		// 验证目标 Branch 存在
+		targetBranch := &neonv1.Branch{}
+		if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: newBranchID, Namespace: s.namespace}, targetBranch); err != nil {
+			if isNotFound(err) {
+				return nil, newError("BRANCH_NOT_FOUND", "target branch '"+newBranchID+"' not found")
+			}
+			return nil, fmt.Errorf("get target branch: %w", err)
+		}
+		// 如果是 read_write 端点，检查目标分支没有其他 read_write
+		if endpoint.Spec.Type == "read_write" {
+			var epList neonv1.EndpointList
+			if err := s.k8sClient.List(ctx, &epList, client.InNamespace(s.namespace)); err != nil {
+				return nil, fmt.Errorf("list endpoints: %w", err)
+			}
+			for _, ep := range epList.Items {
+				if ep.Spec.BranchID == newBranchID && ep.Spec.Type == "read_write" && ep.Name != endpointID {
+					return nil, newError("READ_WRITE_ENDPOINT_EXISTS",
+						"branch '"+newBranchID+"' already has a read_write endpoint '"+ep.Name+"'")
+				}
+			}
+		}
+		endpoint.Spec.BranchID = newBranchID
+		if endpoint.Labels == nil {
+			endpoint.Labels = make(map[string]string)
+		}
+		endpoint.Labels["molnett.org/branch"] = newBranchID
+		changed = true
+	}
+
+	// --- Resources 变更 ---
+	if req.Endpoint.Resources != nil {
+		endpoint.Spec.Resources = toResourceRequirements(req.Endpoint.Resources)
+		changed = true
+	}
+
+	// --- Disabled 变更 ---
+	if req.Endpoint.Disabled != nil {
+		endpoint.Spec.Disabled = *req.Endpoint.Disabled
+		changed = true
+	}
+
+	// --- SuspendTimeoutSeconds 变更（预留）---
+	if req.Endpoint.SuspendTimeoutSeconds != nil {
+		// Serverless 预留字段，暂存但不处理逻辑
+		_ = *req.Endpoint.SuspendTimeoutSeconds
+		changed = true
+	}
+
+	if !changed {
+		return &EndpointGetResponse{
+			Endpoint: EndpointResponse{
+				ID:           endpoint.Name,
+				BranchID:     endpoint.Spec.BranchID,
+				Type:         endpoint.Spec.Type,
+				Host:         endpoint.Status.Host,
+				Port:         endpoint.Status.Port,
+				CurrentState: endpoint.Status.Phase,
+				Disabled:     endpoint.Spec.Disabled,
+				CreatedAt:    endpoint.CreationTimestamp.Time,
+			},
+		}, nil
+	}
+
+	if err := s.k8sClient.Patch(ctx, endpoint, client.MergeFrom(original)); err != nil {
+		return nil, fmt.Errorf("patch endpoint: %w", err)
+	}
+
+	s.log.Info("patched endpoint", "endpointID", endpointID)
+
+	return &EndpointGetResponse{
+		Endpoint: EndpointResponse{
+			ID:           endpoint.Name,
+			BranchID:     endpoint.Spec.BranchID,
+			Type:         endpoint.Spec.Type,
+			Host:         endpoint.Status.Host,
+			Port:         endpoint.Status.Port,
+			CurrentState: endpoint.Status.Phase,
+			Disabled:     endpoint.Spec.Disabled,
+			CreatedAt:    endpoint.CreationTimestamp.Time,
+		},
+	}, nil
+}
+
+// StartEndpoint 启动端点（disabled=false）。
+func (s *apiService) StartEndpoint(ctx context.Context, projectID, endpointID string) (*EndpointActionResponse, error) {
+	endpoint := &neonv1.Endpoint{}
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: endpointID, Namespace: s.namespace}, endpoint); err != nil {
+		if isNotFound(err) {
+			return nil, newError("ENDPOINT_NOT_FOUND", "endpoint '"+endpointID+"' not found")
+		}
+		return nil, fmt.Errorf("get endpoint: %w", err)
+	}
+
+	// 幂等：已经在运行
+	if !endpoint.Spec.Disabled {
+		return &EndpointActionResponse{
+			Endpoint: EndpointResponse{
+				ID:           endpoint.Name,
+				BranchID:     endpoint.Spec.BranchID,
+				Type:         endpoint.Spec.Type,
+				Host:         endpoint.Status.Host,
+				Port:         endpoint.Status.Port,
+				CurrentState: endpoint.Status.Phase,
+				Disabled:     false,
+				CreatedAt:    endpoint.CreationTimestamp.Time,
+			},
+		}, nil
+	}
+
+	original := endpoint.DeepCopy()
+	endpoint.Spec.Disabled = false
+	if err := s.k8sClient.Patch(ctx, endpoint, client.MergeFrom(original)); err != nil {
+		return nil, fmt.Errorf("start endpoint: %w", err)
+	}
+
+	s.log.Info("started endpoint", "endpointID", endpointID)
+
+	return &EndpointActionResponse{
+		Endpoint: EndpointResponse{
+			ID:           endpoint.Name,
+			BranchID:     endpoint.Spec.BranchID,
+			Type:         endpoint.Spec.Type,
+			Host:         endpoint.Status.Host,
+			Port:         endpoint.Status.Port,
+			CurrentState: "starting",
+			Disabled:     false,
+			CreatedAt:    endpoint.CreationTimestamp.Time,
+		},
+	}, nil
+}
+
+// SuspendEndpoint 挂起端点（disabled=true）。
+func (s *apiService) SuspendEndpoint(ctx context.Context, projectID, endpointID string) (*EndpointActionResponse, error) {
+	endpoint := &neonv1.Endpoint{}
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: endpointID, Namespace: s.namespace}, endpoint); err != nil {
+		if isNotFound(err) {
+			return nil, newError("ENDPOINT_NOT_FOUND", "endpoint '"+endpointID+"' not found")
+		}
+		return nil, fmt.Errorf("get endpoint: %w", err)
+	}
+
+	// 幂等：已经挂起
+	if endpoint.Spec.Disabled {
+		return &EndpointActionResponse{
+			Endpoint: EndpointResponse{
+				ID:           endpoint.Name,
+				BranchID:     endpoint.Spec.BranchID,
+				Type:         endpoint.Spec.Type,
+				Host:         endpoint.Status.Host,
+				Port:         endpoint.Status.Port,
+				CurrentState: endpoint.Status.Phase,
+				Disabled:     true,
+				CreatedAt:    endpoint.CreationTimestamp.Time,
+			},
+		}, nil
+	}
+
+	original := endpoint.DeepCopy()
+	endpoint.Spec.Disabled = true
+	if err := s.k8sClient.Patch(ctx, endpoint, client.MergeFrom(original)); err != nil {
+		return nil, fmt.Errorf("suspend endpoint: %w", err)
+	}
+
+	s.log.Info("suspended endpoint", "endpointID", endpointID)
+
+	return &EndpointActionResponse{
+		Endpoint: EndpointResponse{
+			ID:           endpoint.Name,
+			BranchID:     endpoint.Spec.BranchID,
+			Type:         endpoint.Spec.Type,
+			Host:         endpoint.Status.Host,
+			Port:         endpoint.Status.Port,
+			CurrentState: "stopping",
+			Disabled:     true,
+			CreatedAt:    endpoint.CreationTimestamp.Time,
+		},
+	}, nil
+}
+
+// RestartEndpoint 重启端点：suspend → start。
+func (s *apiService) RestartEndpoint(ctx context.Context, projectID, endpointID string) (*EndpointActionResponse, error) {
+	endpoint := &neonv1.Endpoint{}
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: endpointID, Namespace: s.namespace}, endpoint); err != nil {
+		if isNotFound(err) {
+			return nil, newError("ENDPOINT_NOT_FOUND", "endpoint '"+endpointID+"' not found")
+		}
+		return nil, fmt.Errorf("get endpoint: %w", err)
+	}
+
+	// 创建 Operation CR 追踪重启进度
+	opID := generateOperationID()
+	op := &neonv1.Operation{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      opID,
+			Namespace: s.namespace,
+		},
+		Spec: neonv1.OperationSpec{
+			Action:     "restart_endpoint",
+			Status:     "scheduling",
+			ProjectID:  projectID,
+			EndpointID: endpointID,
+		},
+	}
+	if err := s.k8sClient.Create(ctx, op); err != nil {
+		return nil, fmt.Errorf("create operation: %w", err)
+	}
+
+	// 执行 suspend → start 两步操作
+	original := endpoint.DeepCopy()
+
+	// Step 1: suspend
+	endpoint.Spec.Disabled = true
+	if err := s.k8sClient.Patch(ctx, endpoint, client.MergeFrom(original)); err != nil {
+		return nil, fmt.Errorf("suspend for restart: %w", err)
+	}
+
+	// Step 2: start（K8s Patch 后立即 start，Controller 负责顺序执行）
+	// 重新获取最新版本
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: endpointID, Namespace: s.namespace}, endpoint); err != nil {
+		return nil, fmt.Errorf("re-get endpoint for restart: %w", err)
+	}
+	startOriginal := endpoint.DeepCopy()
+	endpoint.Spec.Disabled = false
+	if err := s.k8sClient.Patch(ctx, endpoint, client.MergeFrom(startOriginal)); err != nil {
+		return nil, fmt.Errorf("start after restart: %w", err)
+	}
+
+	s.log.Info("restarted endpoint", "endpointID", endpointID)
+
+	return &EndpointActionResponse{
+		Endpoint: EndpointResponse{
+			ID:           endpoint.Name,
+			BranchID:     endpoint.Spec.BranchID,
+			Type:         endpoint.Spec.Type,
+			Host:         endpoint.Status.Host,
+			Port:         endpoint.Status.Port,
+			CurrentState: "starting",
+			Disabled:     false,
+			CreatedAt:    endpoint.CreationTimestamp.Time,
+		},
+		Operations: []OperationResponse{{
+			ID:         opID,
+			ProjectID:  projectID,
+			EndpointID: endpointID,
+			Action:     "restart_endpoint",
+			Status:     "scheduling",
+			CreatedAt:  op.CreationTimestamp.Time,
+		}},
+	}, nil
+}
+
 // =============================================================================
 // Role 服务
 // =============================================================================
@@ -1053,8 +1426,19 @@ func (s *apiService) CreateRole(ctx context.Context, projectID, branchID string,
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      secretName,
 			Namespace: s.namespace,
+			Labels: map[string]string{
+				"molnett.org/component": "role-password",
+				"molnett.org/role":      role.Name,
+				"molnett.org/branch":    branch.Name,
+			},
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(role, neonv1.GroupVersion.WithKind("Role")),
+			},
 		},
-		StringData: map[string]string{"password": password},
+		StringData: map[string]string{
+			"password": password,
+			"username": roleName,
+		},
 	}
 	if err := s.k8sClient.Create(ctx, secret); err != nil {
 		return nil, fmt.Errorf("create password secret: %w", err)
@@ -1123,7 +1507,8 @@ func (s *apiService) ResetPassword(ctx context.Context, projectID, branchID, rol
 		return nil, fmt.Errorf("list roles: %w", err)
 	}
 
-	for _, r := range list.Items {
+	for i := range list.Items {
+		r := &list.Items[i]
 		if r.Spec.BranchID == branchID && r.Spec.Name == roleName {
 			newPassword := generatePassword()
 
@@ -1147,6 +1532,15 @@ func (s *apiService) ResetPassword(ctx context.Context, projectID, branchID, rol
 				}
 			}
 
+			// Clear EncryptedPassword to force Controller to recompute SCRAM verifier
+			roleCopy := r.DeepCopy()
+			if roleCopy.Status.EncryptedPassword != "" {
+				roleCopy.Status.EncryptedPassword = ""
+				if err := s.k8sClient.Status().Update(ctx, roleCopy); err != nil {
+					s.log.Warn("failed to clear EncryptedPassword after password reset", "error", err)
+				}
+			}
+
 			return &ResetPasswordResponse{
 				Role: RoleResponse{
 					Name:      roleName,
@@ -1159,6 +1553,204 @@ func (s *apiService) ResetPassword(ctx context.Context, projectID, branchID, rol
 	}
 
 	return nil, newError("ROLE_NOT_FOUND", "role '"+roleName+"' not found")
+}
+
+// GetRole 获取单个角色详情。
+func (s *apiService) GetRole(ctx context.Context, projectID, branchID, roleName string) (*RoleGetResponse, error) {
+	// 验证 Branch 存在
+	branch := &neonv1.Branch{}
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: branchID, Namespace: s.namespace}, branch); err != nil {
+		if isNotFound(err) {
+			return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not found")
+		}
+		return nil, fmt.Errorf("get branch: %w", err)
+	}
+	if branch.Spec.ProjectID != projectID {
+		return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not in project '"+projectID+"'")
+	}
+
+	list := &neonv1.RoleList{}
+	if err := s.k8sClient.List(ctx, list, client.InNamespace(s.namespace)); err != nil {
+		return nil, fmt.Errorf("list roles: %w", err)
+	}
+
+	for _, r := range list.Items {
+		if r.Spec.BranchID == branchID && r.Spec.Name == roleName {
+			return &RoleGetResponse{
+				Role: RoleResponse{
+					Name:                 r.Spec.Name,
+					Protected:            r.Status.Protected,
+					BranchID:             branchID,
+					AuthenticationMethod: r.Spec.AuthenticationMethod,
+					CreatedAt:            r.CreationTimestamp.Time,
+				},
+			}, nil
+		}
+	}
+
+	return nil, newError("ROLE_NOT_FOUND", "role '"+roleName+"' not found")
+}
+
+// UpdateRole 更新角色（对标 Neon PATCH，支持重命名和密码重置）。
+// 策略 B：不改名 CR metadata.name，仅更新 spec.Name + Secret username。
+func (s *apiService) UpdateRole(ctx context.Context, projectID, branchID, roleName string, req RoleUpdateRequest) (*RoleUpdateResponse, error) {
+	// 验证 Branch 存在
+	branch := &neonv1.Branch{}
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: branchID, Namespace: s.namespace}, branch); err != nil {
+		if isNotFound(err) {
+			return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not found")
+		}
+		return nil, fmt.Errorf("get branch: %w", err)
+	}
+	if branch.Spec.ProjectID != projectID {
+		return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not in project '"+projectID+"'")
+	}
+
+	// 查找 Role CR
+	list := &neonv1.RoleList{}
+	if err := s.k8sClient.List(ctx, list, client.InNamespace(s.namespace)); err != nil {
+		return nil, fmt.Errorf("list roles: %w", err)
+	}
+	var role *neonv1.Role
+	for i := range list.Items {
+		if list.Items[i].Spec.BranchID == branchID && list.Items[i].Spec.Name == roleName {
+			role = &list.Items[i]
+			break
+		}
+	}
+	if role == nil {
+		return nil, newError("ROLE_NOT_FOUND", "role '"+roleName+"' not found")
+	}
+	if role.Status.Protected {
+		return nil, newError("ROLE_PROTECTED", "protected role '"+roleName+"' cannot be modified")
+	}
+
+	var ops []OperationResponse
+	original := role.DeepCopy()
+	changed := false
+
+	// --- 密码变更 ---
+	if req.Role.Password != nil {
+		newPassword := *req.Role.Password
+		if len(newPassword) < 8 {
+			return nil, newError("VALIDATION_ERROR", "password must be at least 8 characters")
+		}
+
+		// 原地更新 Secret
+		secretName := fmt.Sprintf("role-%s-%s-password", branchID, roleName)
+		secret := &corev1.Secret{}
+		if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: secretName, Namespace: s.namespace}, secret); err != nil {
+			if isNotFound(err) {
+				return nil, newError("ROLE_NOT_FOUND", "password secret not found for role '"+roleName+"'")
+			}
+			return nil, fmt.Errorf("get password secret: %w", err)
+		}
+		if secret.Data == nil {
+			secret.Data = make(map[string][]byte)
+		}
+		secret.Data["password"] = []byte(newPassword)
+		if err := s.k8sClient.Update(ctx, secret); err != nil {
+			return nil, fmt.Errorf("update password secret: %w", err)
+		}
+
+		// 清除 EncryptedPassword，触发 Controller 重算 SCRAM
+		role.Status.EncryptedPassword = ""
+		changed = true
+
+		// 创建 Operation CR 追踪密码推送到 compute_ctl
+		opID := generateOperationID()
+		op := &neonv1.Operation{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      opID,
+				Namespace: s.namespace,
+			},
+			Spec: neonv1.OperationSpec{
+				Action:    "reset_password",
+				Status:    "scheduling",
+				ProjectID: projectID,
+				BranchID:  branchID,
+			},
+		}
+		if err := s.k8sClient.Create(ctx, op); err != nil {
+			s.log.Warn("failed to create operation for password change", "error", err)
+		} else {
+			ops = append(ops, OperationResponse{
+				ID:        opID,
+				ProjectID: projectID,
+				BranchID:  branchID,
+				Action:    "reset_password",
+				Status:    "scheduling",
+				CreatedAt: op.CreationTimestamp.Time,
+			})
+		}
+	}
+
+	// --- 名称变更（策略 B：不改名 CR metadata.name）---
+	if req.Role.Name != nil {
+		newName := *req.Role.Name
+		if len(newName) < 1 || len(newName) > 63 {
+			return nil, newError("INVALID_NAME", "role name must be 1-63 characters")
+		}
+
+		// 检查新名称不冲突
+		for _, r := range list.Items {
+			if r.Spec.BranchID == branchID && r.Spec.Name == newName && r.Name != role.Name {
+				return nil, newError("VALIDATION_ERROR", "role '"+newName+"' already exists in this branch")
+			}
+		}
+
+		// 更新 Spec.Name（CR metadata.name 不变）
+		role.Spec.Name = newName
+		changed = true
+
+		// 更新 Secret 中的 username 字段
+		secretName := fmt.Sprintf("role-%s-%s-password", branchID, roleName)
+		secret := &corev1.Secret{}
+		if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: secretName, Namespace: s.namespace}, secret); err == nil {
+			if secret.Data == nil {
+				secret.Data = make(map[string][]byte)
+			}
+			secret.Data["username"] = []byte(newName)
+			if err := s.k8sClient.Update(ctx, secret); err != nil {
+				s.log.Warn("failed to update username in secret", "error", err)
+			}
+		}
+	}
+
+	if !changed {
+		return &RoleUpdateResponse{
+			Role: RoleResponse{
+				Name:                 roleName,
+				Protected:            role.Status.Protected,
+				BranchID:             branchID,
+				AuthenticationMethod: role.Spec.AuthenticationMethod,
+				CreatedAt:            role.CreationTimestamp.Time,
+			},
+		}, nil
+	}
+
+	// Patch Role CR
+	if err := s.k8sClient.Patch(ctx, role, client.MergeFrom(original)); err != nil {
+		return nil, fmt.Errorf("patch role: %w", err)
+	}
+
+	// 更新 Status（EncryptedPassword 已清除）
+	if err := s.k8sClient.Status().Update(ctx, role); err != nil {
+		s.log.Warn("failed to update role status after patch", "error", err)
+	}
+
+	s.log.Info("patched role", "roleName", roleName, "branchID", branchID)
+
+	return &RoleUpdateResponse{
+		Role: RoleResponse{
+			Name:                 role.Spec.Name,
+			Protected:            role.Status.Protected,
+			BranchID:             branchID,
+			AuthenticationMethod: role.Spec.AuthenticationMethod,
+			CreatedAt:            role.CreationTimestamp.Time,
+		},
+		Operations: ops,
+	}, nil
 }
 
 // =============================================================================
@@ -1256,6 +1848,251 @@ func (s *apiService) DeleteDatabase(ctx context.Context, projectID, branchID, db
 		}
 	}
 	return newError("DATABASE_NOT_FOUND", "database '"+dbName+"' not found")
+}
+
+// GetDatabase 获取单个数据库详情。
+func (s *apiService) GetDatabase(ctx context.Context, projectID, branchID, dbName string) (*DatabaseGetResponse, error) {
+	// 验证 Branch 存在
+	branch := &neonv1.Branch{}
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: branchID, Namespace: s.namespace}, branch); err != nil {
+		if isNotFound(err) {
+			return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not found")
+		}
+		return nil, fmt.Errorf("get branch: %w", err)
+	}
+	if branch.Spec.ProjectID != projectID {
+		return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not in project '"+projectID+"'")
+	}
+
+	list := &neonv1.DatabaseList{}
+	if err := s.k8sClient.List(ctx, list, client.InNamespace(s.namespace)); err != nil {
+		return nil, fmt.Errorf("list databases: %w", err)
+	}
+
+	for _, d := range list.Items {
+		if d.Spec.BranchID == branchID && d.Spec.Name == dbName {
+			return &DatabaseGetResponse{
+				Database: DatabaseResponse{
+					ID:        1,
+					Name:      d.Spec.Name,
+					OwnerName: d.Spec.OwnerName,
+					BranchID:  branchID,
+					CreatedAt: d.CreationTimestamp.Time,
+				},
+			}, nil
+		}
+	}
+
+	return nil, newError("DATABASE_NOT_FOUND", "database '"+dbName+"' not found")
+}
+
+// UpdateDatabase 更新数据库（对标 Neon PATCH，支持重命名和 owner 变更）。
+func (s *apiService) UpdateDatabase(ctx context.Context, projectID, branchID, dbName string, req DatabaseUpdateRequest) (*DatabaseGetResponse, error) {
+	// 验证 Branch 存在
+	branch := &neonv1.Branch{}
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: branchID, Namespace: s.namespace}, branch); err != nil {
+		if isNotFound(err) {
+			return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not found")
+		}
+		return nil, fmt.Errorf("get branch: %w", err)
+	}
+	if branch.Spec.ProjectID != projectID {
+		return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not in project '"+projectID+"'")
+	}
+
+	// 查找 Database CR
+	list := &neonv1.DatabaseList{}
+	if err := s.k8sClient.List(ctx, list, client.InNamespace(s.namespace)); err != nil {
+		return nil, fmt.Errorf("list databases: %w", err)
+	}
+	var database *neonv1.Database
+	for i := range list.Items {
+		if list.Items[i].Spec.BranchID == branchID && list.Items[i].Spec.Name == dbName {
+			database = &list.Items[i]
+			break
+		}
+	}
+	if database == nil {
+		return nil, newError("DATABASE_NOT_FOUND", "database '"+dbName+"' not found")
+	}
+
+	original := database.DeepCopy()
+	changed := false
+
+	// --- 名称变更 ---
+	if req.Database.Name != nil {
+		newName := *req.Database.Name
+		if len(newName) < 1 || len(newName) > 63 {
+			return nil, newError("INVALID_NAME", "database name must be 1-63 characters")
+		}
+		// 检查目标名称不冲突
+		for _, d := range list.Items {
+			if d.Spec.BranchID == branchID && d.Spec.Name == newName && d.Name != database.Name {
+				return nil, newError("DATABASE_NAME_EXISTS", "database '"+newName+"' already exists in this branch")
+			}
+		}
+		database.Spec.Name = newName
+		changed = true
+	}
+
+	// --- Owner 变更 ---
+	if req.Database.OwnerName != nil {
+		newOwner := *req.Database.OwnerName
+		// 验证 Role 存在于同一 Branch
+		roleList := &neonv1.RoleList{}
+		if err := s.k8sClient.List(ctx, roleList, client.InNamespace(s.namespace)); err != nil {
+			return nil, fmt.Errorf("list roles: %w", err)
+		}
+		roleFound := false
+		for _, r := range roleList.Items {
+			if r.Spec.BranchID == branchID && r.Spec.Name == newOwner {
+				roleFound = true
+				break
+			}
+		}
+		if !roleFound {
+			return nil, newError("ROLE_NOT_FOUND", "owner role '"+newOwner+"' not found in branch '"+branchID+"'")
+		}
+		database.Spec.OwnerName = newOwner
+		changed = true
+	}
+
+	if !changed {
+		return &DatabaseGetResponse{
+			Database: DatabaseResponse{
+				Name:      dbName,
+				OwnerName: database.Spec.OwnerName,
+				BranchID:  branchID,
+				CreatedAt: database.CreationTimestamp.Time,
+			},
+		}, nil
+	}
+
+	if err := s.k8sClient.Patch(ctx, database, client.MergeFrom(original)); err != nil {
+		return nil, fmt.Errorf("patch database: %w", err)
+	}
+
+	s.log.Info("patched database", "dbName", dbName, "branchID", branchID)
+
+	return &DatabaseGetResponse{
+		Database: DatabaseResponse{
+			Name:      database.Spec.Name,
+			OwnerName: database.Spec.OwnerName,
+			BranchID:  branchID,
+			CreatedAt: database.CreationTimestamp.Time,
+		},
+	}, nil
+}
+
+// GetConnectionURI 构造数据库连接字符串（对标 Neon GET /api/v2/projects/{project_id}/connection_uri）。
+func (s *apiService) GetConnectionURI(ctx context.Context, projectID string, databaseName, roleName string, branchID, endpointID string, pooled bool) (*ConnectionURIResponse, error) {
+	// 1. 确定分支：若未传则选项目默认分支
+	if branchID == "" {
+		defaultBranch, err := s.findDefaultBranch(ctx, projectID)
+		if err != nil {
+			return nil, err
+		}
+		branchID = defaultBranch.Name
+	}
+
+	// 2. 确定端点：若未传则选分支的 read_write 端点
+	if endpointID == "" {
+		epList := &neonv1.EndpointList{}
+		if err := s.k8sClient.List(ctx, epList, client.InNamespace(s.namespace)); err != nil {
+			return nil, fmt.Errorf("list endpoints: %w", err)
+		}
+		for _, ep := range epList.Items {
+			if ep.Spec.BranchID == branchID && ep.Spec.Type == "read_write" {
+				endpointID = ep.Name
+				break
+			}
+		}
+		if endpointID == "" {
+			return nil, newError("ENDPOINT_NOT_FOUND", "no read_write endpoint found for branch '"+branchID+"'")
+		}
+	}
+
+	// 3. 获取 Endpoint 信息（Host/Port）
+	endpoint := &neonv1.Endpoint{}
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: endpointID, Namespace: s.namespace}, endpoint); err != nil {
+		if isNotFound(err) {
+			return nil, newError("ENDPOINT_NOT_FOUND", "endpoint '"+endpointID+"' not found")
+		}
+		return nil, fmt.Errorf("get endpoint: %w", err)
+	}
+
+	host := endpoint.Status.Host
+	port := endpoint.Status.Port
+	if host == "" {
+		host = endpoint.Name + "." + s.namespace + ".svc.cluster.local"
+	}
+	if port == 0 {
+		port = 5432
+	}
+
+	// 4. 获取密码
+	password := ""
+	roleList := &neonv1.RoleList{}
+	if err := s.k8sClient.List(ctx, roleList, client.InNamespace(s.namespace)); err != nil {
+		return nil, fmt.Errorf("list roles: %w", err)
+	}
+	var targetRole *neonv1.Role
+	for i := range roleList.Items {
+		if roleList.Items[i].Spec.BranchID == branchID && roleList.Items[i].Spec.Name == roleName {
+			targetRole = &roleList.Items[i]
+			break
+		}
+	}
+	if targetRole == nil {
+		return nil, newError("ROLE_NOT_FOUND", "role '"+roleName+"' not found")
+	}
+
+	if targetRole.Status.PasswordSecretRef != nil {
+		secret := &corev1.Secret{}
+		secretKey := client.ObjectKey{
+			Name:      targetRole.Status.PasswordSecretRef.Name,
+			Namespace: targetRole.Status.PasswordSecretRef.Namespace,
+		}
+		if secretKey.Namespace == "" {
+			secretKey.Namespace = s.namespace
+		}
+		if err := s.k8sClient.Get(ctx, secretKey, secret); err == nil {
+			if pw, ok := secret.Data["password"]; ok {
+				password = string(pw)
+			}
+		}
+	}
+
+	// 5. 验证数据库存在
+	dbFound := false
+	dbList := &neonv1.DatabaseList{}
+	if err := s.k8sClient.List(ctx, dbList, client.InNamespace(s.namespace)); err != nil {
+		return nil, fmt.Errorf("list databases: %w", err)
+	}
+	for _, d := range dbList.Items {
+		if d.Spec.BranchID == branchID && d.Spec.Name == databaseName {
+			dbFound = true
+			break
+		}
+	}
+	if !dbFound {
+		return nil, newError("DATABASE_NOT_FOUND", "database '"+databaseName+"' not found")
+	}
+
+	// 6. 构造 URI
+	uri := fmt.Sprintf("postgresql://%s:%s@%s:%d/%s",
+		roleName, password, host, port, databaseName)
+
+	// 如果 pooled 为 true，后续可对接 PgBouncer 地址替换
+
+	return &ConnectionURIResponse{
+		URI:          uri,
+		Pooled:       pooled,
+		DatabaseName: databaseName,
+		RoleName:     roleName,
+		BranchID:     branchID,
+		EndpointID:   endpointID,
+	}, nil
 }
 
 // =============================================================================

@@ -40,7 +40,7 @@ spec:
       - command:
         - bash
         - -c
-        - echo "$INITIAL_SPEC_JSON" > /var/spec.json && /usr/local/bin/compute_ctl
+        - echo "$INITIAL_SPEC_JSON" > /var/spec.json && exec /usr/local/bin/compute_ctl
           --pgdata /.neon/data/pgdata --connstr=postgresql://cloud_admin:@0.0.0.0:55433/postgres
           --compute-id test-branch -p http://neon-controlplane.neon:8081 --pgbin /usr/local/bin/postgres
         env:
@@ -52,6 +52,19 @@ spec:
               key: spec.json
               name: test-branch-compute-spec
         image: neondatabase/compute-node-v17
+        imagePullPolicy: IfNotPresent
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - /usr/local/bin/pg_ctl
+              - stop
+              - -D
+              - /.neon/data/pgdata
+              - -m
+              - fast
+              - -t
+              - "25"
         name: compute-node
         ports:
         - containerPort: 55433
@@ -65,6 +78,7 @@ spec:
       securityContext:
         fsGroup: 1000
         runAsUser: 1000
+      terminationGracePeriodSeconds: 60
       volumes:
       - emptyDir: {}
         name: spec-volume

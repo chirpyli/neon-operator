@@ -210,10 +210,9 @@ func (r *RoleReconciler) ensureEncryptedPassword(ctx context.Context, role *neon
 		return fmt.Errorf("password key not found in secret %q", secretName.Name)
 	}
 
-	// 如果 EncryptedPassword 已存在，检查是否需要重新计算（密码变化场景）
+	// 如果 EncryptedPassword 已存在且非空，跳过重算。
+	// API 层在密码变更时会将 EncryptedPassword 置空，触发 Controller 重新计算 SCRAM。
 	if role.Status.EncryptedPassword != "" {
-		// 简化处理：如果 Status 中已有加密密码且 Secret 存在，则跳过
-		// 密码变化通过 Secret 重建（删除再创建）来检测
 		log.Info("EncryptedPassword already set, skipping SCRAM computation", "role", role.Name)
 		return nil
 	}

@@ -12,7 +12,10 @@ import (
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
 )
 
-func Deployment(branch *neonv1alpha1.Branch, project *neonv1alpha1.Project) *appsv1.Deployment {
+func Deployment(branch *neonv1alpha1.Branch, project *neonv1alpha1.Project, image string) *appsv1.Deployment {
+	if image == "" {
+		image = fmt.Sprintf("neondatabase/compute-node-v%d", branch.Spec.PGVersion)
+	}
 	deploymentName := fmt.Sprintf("%s-compute-node", branch.Name)
 
 	labels := map[string]string{
@@ -50,25 +53,43 @@ func Deployment(branch *neonv1alpha1.Branch, project *neonv1alpha1.Project) *app
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
+					// 优雅终止：给予 PostgreSQL checkpoint + compute_ctl 退出的时间。
+					TerminationGracePeriodSeconds: ptr.To(int64(60)),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsUser: ptr.To(int64(1000)),
 						FSGroup:   ptr.To(int64(1000)),
 					},
 					Containers: []corev1.Container{
 						{
-							Name:  "compute-node",
-							Image: fmt.Sprintf("neondatabase/compute-node-v%d", branch.Spec.PGVersion),
+							Name:            "compute-node",
+							Image:           image,
+							ImagePullPolicy: corev1.PullIfNotPresent,
 							Command: []string{
 								"bash",
 								"-c",
 								fmt.Sprintf(
+									// exec 让 compute_ctl 替换 bash 成为 PID 1。
 									"echo \"$INITIAL_SPEC_JSON\" > /var/spec.json && "+
-										"/usr/local/bin/compute_ctl --pgdata /.neon/data/pgdata "+
+										"exec /usr/local/bin/compute_ctl --pgdata /.neon/data/pgdata "+
 										"--connstr=postgresql://cloud_admin:@0.0.0.0:55433/postgres "+
 										"--compute-id %s -p http://neon-controlplane.neon:8081 "+
 										"--pgbin /usr/local/bin/postgres",
 									branch.Name,
 								),
+							},
+							// preStop 在 SIGTERM 之前执行，主动关闭 PostgreSQL。
+							Lifecycle: &corev1.Lifecycle{
+								PreStop: &corev1.LifecycleHandler{
+									Exec: &corev1.ExecAction{
+										Command: []string{
+											"/usr/local/bin/pg_ctl",
+											"stop",
+											"-D", "/.neon/data/pgdata",
+											"-m", "fast",
+											"-t", "25",
+										},
+									},
+								},
 							},
 							Ports: []corev1.ContainerPort{
 								{

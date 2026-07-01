@@ -64,9 +64,14 @@ spec:
                 - parent-data
                 - schema-only
                 type: string
+              name:
+                description: |-
+                  Name 分支的显示名称（如 "main", "feat/xxx"）。
+                  创建时必需，全局唯一在同一 Project 内。
+                type: string
               parentBranch:
                 description: |-
-                  ParentBranch 父分支名称。
+                  ParentBranch 父分支的 Name（显示名称，非 ID）。
                   为空表示创建主分支（初始分支），非空表示从已有分支创建子分支。
                 type: string
               parentLSN:

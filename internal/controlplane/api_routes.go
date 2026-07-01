@@ -25,23 +25,34 @@ func addAPIRoutes(mux *http.ServeMux, svc *apiService, log *slog.Logger) {
 	mux.Handle("GET /api/v2/projects/{project_id}/branches", logRequests(log, http.HandlerFunc(api.listBranches)))
 	mux.Handle("GET /api/v2/projects/{project_id}/branches/{branch_id}", logRequests(log, http.HandlerFunc(api.getBranch)))
 	mux.Handle("DELETE /api/v2/projects/{project_id}/branches/{branch_id}", logRequests(log, http.HandlerFunc(api.deleteBranch)))
+	mux.Handle("PATCH /api/v2/projects/{project_id}/branches/{branch_id}", logRequests(log, http.HandlerFunc(api.patchBranch)))
+	mux.Handle("POST /api/v2/projects/{project_id}/branches/{branch_id}/set_as_default", logRequests(log, http.HandlerFunc(api.setBranchAsDefault)))
 
 	// ---------- Endpoints ----------
 	mux.Handle("POST /api/v2/projects/{project_id}/endpoints", logRequests(log, http.HandlerFunc(api.createEndpoint)))
 	mux.Handle("GET /api/v2/projects/{project_id}/endpoints", logRequests(log, http.HandlerFunc(api.listEndpoints)))
 	mux.Handle("GET /api/v2/projects/{project_id}/endpoints/{endpoint_id}", logRequests(log, http.HandlerFunc(api.getEndpoint)))
 	mux.Handle("DELETE /api/v2/projects/{project_id}/endpoints/{endpoint_id}", logRequests(log, http.HandlerFunc(api.deleteEndpoint)))
+	mux.Handle("PATCH /api/v2/projects/{project_id}/endpoints/{endpoint_id}", logRequests(log, http.HandlerFunc(api.patchEndpoint)))
+	mux.Handle("POST /api/v2/projects/{project_id}/endpoints/{endpoint_id}/start", logRequests(log, http.HandlerFunc(api.startEndpoint)))
+	mux.Handle("POST /api/v2/projects/{project_id}/endpoints/{endpoint_id}/suspend", logRequests(log, http.HandlerFunc(api.suspendEndpoint)))
+	mux.Handle("POST /api/v2/projects/{project_id}/endpoints/{endpoint_id}/restart", logRequests(log, http.HandlerFunc(api.restartEndpoint)))
 
 	// ---------- Roles ----------
 	mux.Handle("POST /api/v2/projects/{project_id}/branches/{branch_id}/roles", logRequests(log, http.HandlerFunc(api.createRole)))
 	mux.Handle("GET /api/v2/projects/{project_id}/branches/{branch_id}/roles", logRequests(log, http.HandlerFunc(api.listRoles)))
 	mux.Handle("DELETE /api/v2/projects/{project_id}/branches/{branch_id}/roles/{role_name}", logRequests(log, http.HandlerFunc(api.deleteRole)))
 	mux.Handle("POST /api/v2/projects/{project_id}/branches/{branch_id}/roles/{role_name}/reset_password", logRequests(log, http.HandlerFunc(api.resetRolePassword)))
+	mux.Handle("GET /api/v2/projects/{project_id}/branches/{branch_id}/roles/{role_name}", logRequests(log, http.HandlerFunc(api.getRole)))
+	mux.Handle("PATCH /api/v2/projects/{project_id}/branches/{branch_id}/roles/{role_name}", logRequests(log, http.HandlerFunc(api.patchRole)))
 
 	// ---------- Databases ----------
 	mux.Handle("POST /api/v2/projects/{project_id}/branches/{branch_id}/databases", logRequests(log, http.HandlerFunc(api.createDatabase)))
 	mux.Handle("GET /api/v2/projects/{project_id}/branches/{branch_id}/databases", logRequests(log, http.HandlerFunc(api.listDatabases)))
 	mux.Handle("DELETE /api/v2/projects/{project_id}/branches/{branch_id}/databases/{database_name}", logRequests(log, http.HandlerFunc(api.deleteDatabase)))
+	mux.Handle("GET /api/v2/projects/{project_id}/branches/{branch_id}/databases/{database_name}", logRequests(log, http.HandlerFunc(api.getDatabase)))
+	mux.Handle("PATCH /api/v2/projects/{project_id}/branches/{branch_id}/databases/{database_name}", logRequests(log, http.HandlerFunc(api.patchDatabase)))
+	mux.Handle("GET /api/v2/projects/{project_id}/connection_uri", logRequests(log, http.HandlerFunc(api.getConnectionURI)))
 
 	// ---------- Operations ----------
 	mux.Handle("GET /api/v2/projects/{project_id}/operations", logRequests(log, http.HandlerFunc(api.listOperations)))
@@ -66,7 +77,10 @@ func (h *apiHandler) handleAPIError(w http.ResponseWriter, err error) {
 			"DEFAULT_BRANCH_NOT_FOUND":
 			status = http.StatusNotFound
 		case "DEFAULT_BRANCH_DELETE", "PROTECTED_BRANCH", "PROTECTED_ROLE",
-			"IMMUTABLE_FIELD":
+			"ROLE_PROTECTED",
+			"IMMUTABLE_FIELD", "BRANCH_PROTECTED", "BRANCH_DEFAULT_CLEAR_FAILED",
+			"DATABASE_NAME_EXISTS",
+			"ENDPOINT_BUSY", "READ_WRITE_ENDPOINT_EXISTS":
 			status = http.StatusConflict
 		case "INVALID_NAME":
 			status = http.StatusBadRequest
@@ -232,6 +246,44 @@ func (h *apiHandler) deleteBranch(w http.ResponseWriter, r *http.Request) {
 	_ = writeJSON(w, http.StatusOK, resp)
 }
 
+func (h *apiHandler) patchBranch(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if err := r.Body.Close(); err != nil {
+			h.log.Error("failed to close request body", "error", err)
+		}
+	}()
+
+	projectID := r.PathValue("project_id")
+	branchID := r.PathValue("branch_id")
+
+	var req BranchUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid JSON request body")
+		return
+	}
+
+	resp, err := h.svc.UpdateBranch(r.Context(), projectID, branchID, req)
+	if err != nil {
+		h.handleAPIError(w, err)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, map[string]interface{}{"branch": resp})
+}
+
+func (h *apiHandler) setBranchAsDefault(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("project_id")
+	branchID := r.PathValue("branch_id")
+
+	resp, err := h.svc.SetBranchAsDefault(r.Context(), projectID, branchID)
+	if err != nil {
+		h.handleAPIError(w, err)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, map[string]interface{}{"branch": resp})
+}
+
 // =============================================================================
 // Endpoint Handlers
 // =============================================================================
@@ -290,6 +342,70 @@ func (h *apiHandler) deleteEndpoint(w http.ResponseWriter, r *http.Request) {
 	endpointID := r.PathValue("endpoint_id")
 
 	resp, err := h.svc.DeleteEndpoint(r.Context(), projectID, endpointID)
+	if err != nil {
+		h.handleAPIError(w, err)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *apiHandler) patchEndpoint(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if err := r.Body.Close(); err != nil {
+			h.log.Error("failed to close request body", "error", err)
+		}
+	}()
+
+	projectID := r.PathValue("project_id")
+	endpointID := r.PathValue("endpoint_id")
+
+	var req EndpointUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid JSON request body")
+		return
+	}
+
+	resp, err := h.svc.UpdateEndpoint(r.Context(), projectID, endpointID, req)
+	if err != nil {
+		h.handleAPIError(w, err)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *apiHandler) startEndpoint(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("project_id")
+	endpointID := r.PathValue("endpoint_id")
+
+	resp, err := h.svc.StartEndpoint(r.Context(), projectID, endpointID)
+	if err != nil {
+		h.handleAPIError(w, err)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *apiHandler) suspendEndpoint(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("project_id")
+	endpointID := r.PathValue("endpoint_id")
+
+	resp, err := h.svc.SuspendEndpoint(r.Context(), projectID, endpointID)
+	if err != nil {
+		h.handleAPIError(w, err)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *apiHandler) restartEndpoint(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("project_id")
+	endpointID := r.PathValue("endpoint_id")
+
+	resp, err := h.svc.RestartEndpoint(r.Context(), projectID, endpointID)
 	if err != nil {
 		h.handleAPIError(w, err)
 		return
@@ -367,6 +483,46 @@ func (h *apiHandler) resetRolePassword(w http.ResponseWriter, r *http.Request) {
 	_ = writeJSON(w, http.StatusOK, resp)
 }
 
+func (h *apiHandler) getRole(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("project_id")
+	branchID := r.PathValue("branch_id")
+	roleName := r.PathValue("role_name")
+
+	resp, err := h.svc.GetRole(r.Context(), projectID, branchID, roleName)
+	if err != nil {
+		h.handleAPIError(w, err)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *apiHandler) patchRole(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if err := r.Body.Close(); err != nil {
+			h.log.Error("failed to close request body", "error", err)
+		}
+	}()
+
+	projectID := r.PathValue("project_id")
+	branchID := r.PathValue("branch_id")
+	roleName := r.PathValue("role_name")
+
+	var req RoleUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid JSON request body")
+		return
+	}
+
+	resp, err := h.svc.UpdateRole(r.Context(), projectID, branchID, roleName, req)
+	if err != nil {
+		h.handleAPIError(w, err)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, resp)
+}
+
 // =============================================================================
 // Database Handlers
 // =============================================================================
@@ -420,6 +576,69 @@ func (h *apiHandler) deleteDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_ = writeJSON(w, http.StatusOK, map[string]interface{}{"deleted": true})
+}
+
+func (h *apiHandler) getDatabase(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("project_id")
+	branchID := r.PathValue("branch_id")
+	dbName := r.PathValue("database_name")
+
+	resp, err := h.svc.GetDatabase(r.Context(), projectID, branchID, dbName)
+	if err != nil {
+		h.handleAPIError(w, err)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *apiHandler) patchDatabase(w http.ResponseWriter, r *http.Request) {
+	defer func() {
+		if err := r.Body.Close(); err != nil {
+			h.log.Error("failed to close request body", "error", err)
+		}
+	}()
+
+	projectID := r.PathValue("project_id")
+	branchID := r.PathValue("branch_id")
+	dbName := r.PathValue("database_name")
+
+	var req DatabaseUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "invalid JSON request body")
+		return
+	}
+
+	resp, err := h.svc.UpdateDatabase(r.Context(), projectID, branchID, dbName, req)
+	if err != nil {
+		h.handleAPIError(w, err)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *apiHandler) getConnectionURI(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("project_id")
+
+	databaseName := r.URL.Query().Get("database_name")
+	roleName := r.URL.Query().Get("role_name")
+	branchID := r.URL.Query().Get("branch_id")
+	endpointID := r.URL.Query().Get("endpoint_id")
+	pooled := r.URL.Query().Get("pooled") == "true"
+
+	if databaseName == "" || roleName == "" {
+		writeAPIError(w, http.StatusBadRequest, "INVALID_REQUEST", "database_name and role_name are required query parameters")
+		return
+	}
+
+	resp, err := h.svc.GetConnectionURI(r.Context(), projectID, databaseName, roleName, branchID, endpointID, pooled)
+	if err != nil {
+		h.handleAPIError(w, err)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, resp)
 }
 
 // =============================================================================

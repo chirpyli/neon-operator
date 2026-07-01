@@ -66,7 +66,7 @@ spec:
             - --controlplane-bind-address=:8082
           image: controller
           name: manager
-          imagePullPolicy: Always
+          imagePullPolicy: IfNotPresent
           env:
             - name: WATCH_NAMESPACE
               valueFrom:
@@ -75,6 +75,9 @@ spec:
           ports:
             - containerPort: 8082
               name: controlplane
+              protocol: TCP
+            - containerPort: 8443
+              name: metrics
               protocol: TCP
           securityContext:
             readOnlyRootFilesystem: true
@@ -99,12 +102,16 @@ spec:
           resources:
             limits:
               cpu: 500m
-              memory: 128Mi
+              memory: 512Mi
             requests:
               cpu: 10m
-              memory: 64Mi
-          volumeMounts: []
-      volumes: []
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
 ---

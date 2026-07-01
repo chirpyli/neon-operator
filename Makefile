@@ -65,7 +65,24 @@ test: manifests generate fmt vet setup-envtest ## Run tests.
 # The default setup assumes Kind is pre-installed and builds/loads the Manager Docker image locally.
 # CertManager is installed by default; skip with:
 # - CERT_MANAGER_INSTALL_SKIP=true
+# The Neon Lifecycle test is skipped by default because it requires large neon images.
+# Enable it with:
+# - LIFECYCLE_TEST_SKIP=false
+# When running the lifecycle test, provide local/mirrored neon images:
+# - NEON_IMAGE=ghcr.io/neondatabase/neon:latest
+# - COMPUTE_IMAGE=ghcr.io/neondatabase/compute-node-v17:latest
+# The lifecycle test automatically uses a multi-node Kind config to satisfy
+# safekeeper/pageserver PodAntiAffinity constraints.
 KIND_CLUSTER ?= neon-operator-go-test-e2e
+LIFECYCLE_TEST_SKIP ?= true
+NEON_IMAGE ?=
+COMPUTE_IMAGE ?=
+
+# When lifecycle tests are enabled, use a multi-node Kind config so
+# safekeeper RequiredDuringScheduling PodAntiAffinity can be satisfied.
+ifeq ($(LIFECYCLE_TEST_SKIP),false)
+KIND_CONFIG = test/e2e/kind-multinode.yaml
+endif
 
 .PHONY: setup-test-e2e
 setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
@@ -73,12 +90,25 @@ setup-test-e2e: ## Set up a Kind cluster for e2e tests if it does not exist
 		echo "Kind is not installed. Please install Kind manually."; \
 		exit 1; \
 	}
-	@case "$$($(KIND) get clusters)" in \
+	@case "$$($(KIND) get clusters 2>/dev/null)" in \
 		*"$(KIND_CLUSTER)"*) \
-			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Skipping creation." ;; \
+			echo "Kind cluster '$(KIND_CLUSTER)' already exists. Deleting it first for a clean slate..."; \
+			$(KIND) delete cluster --name $(KIND_CLUSTER) 2>/dev/null || true; \
+			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
+			if [ -n "$(KIND_CONFIG)" ] && [ -f "$(KIND_CONFIG)" ]; then \
+				echo "Using multi-node config: $(KIND_CONFIG)"; \
+				$(KIND) create cluster --name $(KIND_CLUSTER) --config $(KIND_CONFIG); \
+			else \
+				$(KIND) create cluster --name $(KIND_CLUSTER); \
+			fi ;; \
 		*) \
 			echo "Creating Kind cluster '$(KIND_CLUSTER)'..."; \
-			$(KIND) create cluster --name $(KIND_CLUSTER) ;; \
+			if [ -n "$(KIND_CONFIG)" ] && [ -f "$(KIND_CONFIG)" ]; then \
+				echo "Using multi-node config: $(KIND_CONFIG)"; \
+				$(KIND) create cluster --name $(KIND_CLUSTER) --config $(KIND_CONFIG); \
+			else \
+				$(KIND) create cluster --name $(KIND_CLUSTER); \
+			fi ;; \
 	esac
 
 .PHONY: test-e2e
@@ -89,7 +119,7 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 	tmpdir=$$(mktemp -d); \
 	export KUBECONFIG="$$tmpdir/kubeconfig"; \
 	$(KIND) export kubeconfig --name $(KIND_CLUSTER) --kubeconfig "$$KUBECONFIG"; \
-	KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v
+	LIFECYCLE_TEST_SKIP=$(LIFECYCLE_TEST_SKIP) NEON_IMAGE=$(NEON_IMAGE) COMPUTE_IMAGE=$(COMPUTE_IMAGE) KIND_CLUSTER=$(KIND_CLUSTER) go test ./test/e2e/ -v -ginkgo.v -timeout 30m
 
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests

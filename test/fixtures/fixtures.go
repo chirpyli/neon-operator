@@ -13,9 +13,16 @@ import (
 const (
 	DefaultPGVersion      = 17
 	DefaultNumSafekeepers = uint8(3)
-	DefaultNeonImage      = "neondatabase/neon:8463"
 	DefaultStorageSize    = "1Gi"
 )
+
+// DefaultNeonImage is the default neon image used when creating Cluster fixtures.
+// It can be overridden via the NEON_IMAGE environment variable in e2e tests.
+// When set to a single image that also contains the compute binary (like
+// ghcr.io/neondatabase/neon:latest), the e2e suite will retag it as
+// neondatabase/compute-node-v{PGVersion} so the controller's hardcoded compute
+// image reference resolves correctly.
+var DefaultNeonImage = "neondatabase/neon:8463"
 
 func NewCluster(name, namespace string) *neonv1alpha1.Cluster {
 	return &neonv1alpha1.Cluster{

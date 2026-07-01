@@ -422,3 +422,107 @@ type computeSpecData struct {
 	Mode                  string                       `json:"mode,omitempty"`
 	Resources             *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
+
+// ---------- Branch PATCH types ----------
+
+// BranchUpdateRequest PATCH /api/v2/projects/{project_id}/branches/{branch_id}
+type BranchUpdateRequest struct {
+	Branch BranchUpdatePayload `json:"branch"`
+}
+
+// BranchUpdatePayload 分支可更新字段。
+// 所有字段为可选：nil/未出现=Noop，非nil=Upsert。
+type BranchUpdatePayload struct {
+	// Name 分支显示名称（1-256 字符）。
+	Name *string `json:"name,omitempty"`
+	// Protected 保护分支标记。
+	Protected *bool `json:"protected,omitempty"`
+}
+
+// ---------- Role PATCH types ----------
+
+// RoleUpdateRequest PATCH /api/v2/projects/{project_id}/branches/{branch_id}/roles/{role_name}
+type RoleUpdateRequest struct {
+	Role RoleUpdatePayload `json:"role"`
+}
+
+// RoleUpdatePayload 角色可更新字段。
+type RoleUpdatePayload struct {
+	// Name 重命名角色。
+	Name *string `json:"name,omitempty"`
+	// Password 重置密码（明文）。
+	Password *string `json:"password,omitempty"`
+}
+
+// RoleGetResponse GET single role 响应包装
+type RoleGetResponse struct {
+	Role RoleResponse `json:"role"`
+}
+
+// RoleUpdateResponse PATCH role 响应（含 operations 跟踪异步操作）
+type RoleUpdateResponse struct {
+	Role       RoleResponse        `json:"role"`
+	Operations []OperationResponse `json:"operations"`
+}
+
+// ---------- Endpoint PATCH types ----------
+
+// EndpointUpdateRequest PATCH /api/v2/projects/{project_id}/endpoints/{endpoint_id}
+type EndpointUpdateRequest struct {
+	Endpoint EndpointUpdatePayload `json:"endpoint"`
+}
+
+// EndpointUpdatePayload 端点可更新字段。
+type EndpointUpdatePayload struct {
+	// BranchID 将端点迁移到另一个分支。
+	BranchID *string `json:"branch_id,omitempty"`
+	// Resources 计算资源规格。
+	Resources *ComputeResources `json:"resources,omitempty"`
+	// Disabled 禁用以暂停连接。
+	Disabled *bool `json:"disabled,omitempty"`
+	// SuspendTimeoutSeconds Serverless 空闲自动挂起超时（预留）。
+	SuspendTimeoutSeconds *int32 `json:"suspend_timeout_seconds,omitempty"`
+}
+
+// EndpointGetResponse GET single endpoint 响应包装
+type EndpointGetResponse struct {
+	Endpoint EndpointResponse `json:"endpoint"`
+}
+
+// EndpointActionResponse start/suspend/restart 响应（含 operations）
+type EndpointActionResponse struct {
+	Endpoint   EndpointResponse    `json:"endpoint"`
+	Operations []OperationResponse `json:"operations"`
+}
+
+// ---------- Database PATCH types ----------
+
+// DatabaseUpdateRequest PATCH /api/v2/projects/{project_id}/branches/{branch_id}/databases/{database_name}
+type DatabaseUpdateRequest struct {
+	Database DatabaseUpdatePayload `json:"database"`
+}
+
+// DatabaseUpdatePayload 数据库可更新字段。
+type DatabaseUpdatePayload struct {
+	// Name 重命名数据库。
+	Name *string `json:"name,omitempty"`
+	// OwnerName 修改数据库所有者。
+	OwnerName *string `json:"owner_name,omitempty"`
+}
+
+// DatabaseGetResponse GET single database 响应包装
+type DatabaseGetResponse struct {
+	Database DatabaseResponse `json:"database"`
+}
+
+// ---------- Connection URI types ----------
+
+// ConnectionURIResponse GET connection_uri 响应（URI + 元信息）
+type ConnectionURIResponse struct {
+	URI          string `json:"uri"`
+	Pooled       bool   `json:"pooled"`
+	DatabaseName string `json:"database_name"`
+	RoleName     string `json:"role_name"`
+	BranchID     string `json:"branch_id"`
+	EndpointID   string `json:"endpoint_id"`
+}

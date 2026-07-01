@@ -1,0 +1,22 @@
+# Multi-node Kind config for lifecycle e2e tests.
+# 
+# Required because safekeeper and pageserver StatefulSets use
+# RequiredDuringScheduling PodAntiAffinity to distribute pods
+# across nodes for HA. A single-node Kind cluster cannot satisfy
+# this constraint when NumSafekeepers >= 3.
+#
+# Topology:
+#   - 1 control-plane (schedulable, taint removed)
+#   - 2 workers
+#   Total: 3 schedulable nodes for 3 safekeepers + 1 pageserver.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          taints: []
+  - role: worker
+  - role: worker

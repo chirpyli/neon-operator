@@ -189,7 +189,27 @@ func main() {
 		})
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+
+	// In some Kind multi-node setups, the discovery API call during field-index
+	// registration may fail TLS verification due to certificate chain issues
+	// between the service-account CA and the API server certificate.
+	// When INSECURE_SKIP_VERIFY=true, disable TLS verification on the whole
+	// restConfig so that ALL manager components (client, cache, field indexer,
+	// dynamic REST mapper, etc.) use the same insecure transport.  Passing a
+	// separate cache-only insecure mapper is insufficient because field-index
+	// registration and other lazy discovery paths may internally route through
+	// the manager's own REST config rather than the cache's mapper, leading to
+	// 401s when the per-component HTTP client loses the bearer token during
+	// the config-copy → transport-creation pipeline.
+	if os.Getenv("INSECURE_SKIP_VERIFY") == "true" {
+		setupLog.Info("WARNING: disabling TLS verification on REST config (INSECURE_SKIP_VERIFY=true)")
+		restConfig.Insecure = true
+		restConfig.CAFile = ""
+		restConfig.CAData = nil
+	}
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,

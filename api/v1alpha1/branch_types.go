@@ -35,7 +35,11 @@ type BranchSpec struct {
 	// The ID of the Project this Branch belongs to
 	ProjectID string `json:"projectID"`
 
-	// ParentBranch 父分支名称。
+	// Name 分支的显示名称（如 "main", "feat/xxx"）。
+	// 创建时必需，全局唯一在同一 Project 内。
+	Name string `json:"name,omitempty"`
+
+	// ParentBranch 父分支的 Name（显示名称，非 ID）。
 	// 为空表示创建主分支（初始分支），非空表示从已有分支创建子分支。
 	// +optional
 	ParentBranch string `json:"parentBranch,omitempty"`

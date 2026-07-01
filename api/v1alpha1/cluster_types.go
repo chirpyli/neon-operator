@@ -101,6 +101,11 @@ type ClusterSpec struct {
 	// +kubebuilder:default:="neondatabase/neon:8463"
 	NeonImage string `json:"neonImage"`
 
+	// ComputeImage specifies the compute-node container image.
+	// When empty, defaults to neondatabase/compute-node-v{PGVersion}.
+	// +optional
+	ComputeImage string `json:"computeImage,omitempty"`
+
 	// Reference to a Secret containing credentials for accessing a storage bucket.
 	BucketCredentialsSecret *corev1.SecretReference `json:"bucketCredentialsSecret"`
 

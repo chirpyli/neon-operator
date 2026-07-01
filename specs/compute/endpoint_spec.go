@@ -26,7 +26,12 @@ var endpointLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOption
 // =============================================================================
 
 // EndpointDeployment 为 Endpoint 构建 Deployment。
-func EndpointDeployment(endpoint *neonv1alpha1.Endpoint, branch *neonv1alpha1.Branch, project *neonv1alpha1.Project) *appsv1.Deployment {
+// image 指定使用的 compute 容器镜像（如 cluster.Spec.NeonImage），
+// 默认为 neondatabase/compute-node-v{PGVersion}。
+func EndpointDeployment(endpoint *neonv1alpha1.Endpoint, branch *neonv1alpha1.Branch, project *neonv1alpha1.Project, image string) *appsv1.Deployment {
+	if image == "" {
+		image = fmt.Sprintf("neondatabase/compute-node-v%d", branch.Spec.PGVersion)
+	}
 	deploymentName := endpointDeploymentName(endpoint)
 
 	labels := map[string]string{
@@ -67,25 +72,48 @@ func EndpointDeployment(endpoint *neonv1alpha1.Endpoint, branch *neonv1alpha1.Br
 					Labels: labels,
 				},
 				Spec: corev1.PodSpec{
+					// 优雅终止：给予 PostgreSQL checkpoint + compute_ctl 退出的时间。
+					// 与 pageserver 保持一致使用 60s。
+					TerminationGracePeriodSeconds: ptr.To(int64(60)),
 					SecurityContext: &corev1.PodSecurityContext{
 						RunAsUser: ptr.To(int64(1000)),
 						FSGroup:   ptr.To(int64(1000)),
 					},
 					Containers: []corev1.Container{
 						{
-							Name:  "compute-node",
-							Image: fmt.Sprintf("neondatabase/compute-node-v%d", branch.Spec.PGVersion),
+							Name:            "compute-node",
+							Image:           image,
+							ImagePullPolicy: corev1.PullIfNotPresent,
 							Command: []string{
 								"bash",
 								"-c",
 								fmt.Sprintf(
+									// exec 让 compute_ctl 替换 bash 成为 PID 1，
+									// 确保 K8s SIGTERM 直接送达 compute_ctl 而非被 bash 吞掉。
 									"echo \"$INITIAL_SPEC_JSON\" > /var/spec.json && "+
-										"/usr/local/bin/compute_ctl --pgdata /.neon/data/pgdata "+
+										"exec /usr/local/bin/compute_ctl --pgdata /.neon/data/pgdata "+
 										"--connstr=postgresql://cloud_admin:@0.0.0.0:55433/postgres "+
 										"--compute-id %s -p http://neon-controlplane.neon:8081 "+
 										"--pgbin /usr/local/bin/postgres",
 									endpoint.Name,
 								),
+							},
+							// preStop 在 SIGTERM 之前执行，主动触发 PostgreSQL 干净关闭：
+							//   -m fast   : 回滚活跃事务，正常做 checkpoint
+							//   -t 25     : 等待 25s（在 60s 宽限期内留足够缓冲）
+							//   || true   : pg down 时不因错误阻塞终止流程
+							Lifecycle: &corev1.Lifecycle{
+								PreStop: &corev1.LifecycleHandler{
+									Exec: &corev1.ExecAction{
+										Command: []string{
+											"/usr/local/bin/pg_ctl",
+											"stop",
+											"-D", "/.neon/data/pgdata",
+											"-m", "fast",
+											"-t", "25",
+										},
+									},
+								},
 							},
 							Ports: []corev1.ContainerPort{
 								{

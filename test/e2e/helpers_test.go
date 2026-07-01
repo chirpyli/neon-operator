@@ -36,23 +36,22 @@ import (
 )
 
 const (
-	lifecycleClusterName    = "cluster-e2e"
-	lifecycleProjectName    = "project-e2e"
-	lifecycleBranchName     = "branch-e2e"
-	lifecycleEndpointName   = "endpoint-e2e"
-	lifecyclePageserverName = "pageserver-e2e"
-	lifecyclePageserverID   = uint64(1)
+	lifecycleClusterName  = "cluster-e2e"
+	lifecycleProjectName  = "project-e2e"
+	lifecycleBranchName   = "branch-e2e"
+	lifecycleEndpointName = "endpoint-e2e"
+	lifecyclePageserverID = uint64(1)
 
-	lifecycleMinIOName          = "minio-e2e"
-	lifecycleMinIOClientPodName = "minio-mc-e2e"
-	lifecycleMinIOBucket        = "neon-e2e-bucket"
-	lifecycleMinIOAccessKey     = "e2e-access-key"
-	lifecycleMinIOSecretKey     = "e2e-secret-key"
-	lifecycleStorageDBName      = "storage-db-e2e"
+	lifecycleMinIOName        = "minio-e2e"
+	lifecycleMinIOPortForward = 19000
+	lifecycleMinIOBucket      = "neon-e2e-bucket"
+	lifecycleMinIOAccessKey   = "e2e-access-key"
+	lifecycleMinIOSecretKey   = "e2e-secret-key"
+	lifecycleStorageDBName    = "storage-db-e2e"
 
 	lifecycleExistsTimeout       = 90 * time.Second
-	lifecycleAvailableTimeout    = 4 * time.Minute
-	lifecycleComputeReadyTimeout = 5 * time.Minute
+	lifecycleAvailableTimeout    = 15 * time.Minute
+	lifecycleComputeReadyTimeout = 10 * time.Minute
 	lifecycleSQLTimeout          = 3 * time.Minute
 	lifecyclePollInterval        = 2 * time.Second
 	lifecycleSQLRetryInterval    = 5 * time.Second
@@ -152,9 +151,10 @@ func minioDeployment(ns string) *appsv1.Deployment {
 				ObjectMeta: metav1.ObjectMeta{Labels: l},
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
-						Name:  "minio",
-						Image: "minio/minio:latest",
-						Args:  []string{"server", "/data"},
+						Name:            "minio",
+						Image:           "minio/minio:latest",
+						ImagePullPolicy: corev1.PullIfNotPresent,
+						Args:            []string{"server", "/data"},
 						Env: []corev1.EnvVar{
 							{Name: "MINIO_ROOT_USER", Value: lifecycleMinIOAccessKey},
 							{Name: "MINIO_ROOT_PASSWORD", Value: lifecycleMinIOSecretKey},
@@ -203,30 +203,34 @@ func waitForDeploymentAvailable(ctx context.Context, cli client.Client, ns, name
 }
 
 func ensureMinIOBucket(ns string) {
-	_, _ = testutils.Run(exec.Command("kubectl", "delete", "pod", lifecycleMinIOClientPodName,
-		"-n", ns, "--ignore-not-found"))
-
-	cmd := exec.Command(
-		"kubectl", "run", lifecycleMinIOClientPodName,
-		"--restart=Never",
-		"--namespace", ns,
-		"--image=minio/mc:latest",
-		"--command",
-		"--",
-		"/bin/sh", "-c",
-		fmt.Sprintf(
-			"mc alias set local http://%s:9000 %s %s && mc mb -p local/%s",
-			lifecycleMinIOName, lifecycleMinIOAccessKey, lifecycleMinIOSecretKey, lifecycleMinIOBucket,
-		),
+	// Use kubectl port-forward + local mc CLI instead of a Kubernetes pod.
+	// In multi-node Kind clusters, cross-node pod-to-service communication
+	// via kindnet may be unreliable for one-shot pods.
+	By("port-forwarding to MinIO and creating bucket with local mc")
+	pfCmd := exec.Command(
+		"kubectl", "port-forward", "-n", ns,
+		fmt.Sprintf("svc/%s", lifecycleMinIOName),
+		fmt.Sprintf("%d:9000", lifecycleMinIOPortForward),
 	)
-	_, err := testutils.Run(cmd)
-	Expect(err).NotTo(HaveOccurred(), "failed to start minio bucket bootstrap pod")
+	if err := pfCmd.Start(); err != nil {
+		Fail(fmt.Sprintf("failed to start port-forward: %v", err))
+	}
+	defer func() { _ = pfCmd.Process.Kill() }()
+
+	// Wait for port-forward to be ready, then run mc commands.
+	time.Sleep(3 * time.Second)
 
 	Eventually(func(g Gomega) {
-		out, err := testutils.Run(exec.Command("kubectl", "get", "pod", lifecycleMinIOClientPodName,
-			"-n", ns, "-o", "jsonpath={.status.phase}"))
-		g.Expect(err).NotTo(HaveOccurred())
-		g.Expect(out).To(Equal("Succeeded"), "minio bucket bootstrap pod did not succeed")
+		mcAlias := exec.Command("mc", "alias", "set", "local",
+			fmt.Sprintf("http://localhost:%d", lifecycleMinIOPortForward),
+			lifecycleMinIOAccessKey, lifecycleMinIOSecretKey,
+		)
+		out, err := testutils.Run(mcAlias)
+		g.Expect(err).NotTo(HaveOccurred(), "mc alias set failed: %s", out)
+
+		mcMb := exec.Command("mc", "mb", "-p", fmt.Sprintf("local/%s", lifecycleMinIOBucket))
+		out, err = testutils.Run(mcMb)
+		g.Expect(err).NotTo(HaveOccurred(), "mc mb failed: %s", out)
 	}, lifecycleAvailableTimeout, lifecyclePollInterval).Should(Succeed())
 }
 
@@ -306,6 +310,7 @@ func dumpLifecycleDiagnostics(ns string) {
 	dump("lifecycle CRs", "get", "cluster,project,branch,pageserver,safekeeper", "-o", "wide")
 	dump("pods", "get", "pods", "-o", "wide")
 	dump("events (last)", "get", "events", "--sort-by=.lastTimestamp")
+	dump("controller-manager logs", "logs", "-l", "control-plane=controller-manager", "--tail=200")
 	dump("storage-controller logs", "logs", storconDeploy, "--tail=200")
 	dump("storage-broker logs", "logs", storbrokerDeploy, "--tail=100")
 	dump("pageserver logs", "logs", "-l", "molnett.org/component=pageserver", "--tail=200")

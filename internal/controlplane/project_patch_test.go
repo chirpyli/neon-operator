@@ -87,6 +87,7 @@ func TestPatchProject_HistoryRetentionSeconds(t *testing.T) {
 	body := `{"project":{"history_retention_seconds":2592000}}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/v2/projects/my-project", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("project_id", "my-project")
 	w := httptest.NewRecorder()
 
 	handler.patchProject(w, req)
@@ -121,6 +122,7 @@ func TestPatchProject_InvalidHistoryRetention(t *testing.T) {
 	body := `{"project":{"history_retention_seconds":-1}}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/v2/projects/my-project", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("project_id", "my-project")
 	w := httptest.NewRecorder()
 
 	handler.patchProject(w, req)
@@ -148,6 +150,7 @@ func TestPatchProject_IPAllowUpsert(t *testing.T) {
 	body := `{"project":{"ip_allow":{"primary_branch_only":true,"source_ranges":["10.0.0.0/8"]}}}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/v2/projects/my-project", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("project_id", "my-project")
 	w := httptest.NewRecorder()
 
 	handler.patchProject(w, req)
@@ -187,6 +190,7 @@ func TestPatchProject_IPAllowRemove(t *testing.T) {
 	body := `{"project":{"ip_allow":null}}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/v2/projects/my-project", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("project_id", "my-project")
 	w := httptest.NewRecorder()
 
 	handler.patchProject(w, req)
@@ -221,6 +225,7 @@ func TestPatchProject_DefaultEndpointSettings(t *testing.T) {
 	body := `{"project":{"default_endpoint_settings":{"resources":{"cpu":"2","memory":"4Gi"}}}}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/v2/projects/my-project", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("project_id", "my-project")
 	w := httptest.NewRecorder()
 
 	handler.patchProject(w, req)
@@ -261,6 +266,7 @@ func TestPatchProject_Noop(t *testing.T) {
 	body := `{"project":{}}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/v2/projects/my-project", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("project_id", "my-project")
 	w := httptest.NewRecorder()
 
 	handler.patchProject(w, req)
@@ -310,6 +316,7 @@ func TestPatchProject_InvalidName(t *testing.T) {
 	body := `{"project":{"name":""}}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/v2/projects/my-project", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("project_id", "my-project")
 	w := httptest.NewRecorder()
 
 	handler.patchProject(w, req)
@@ -368,6 +375,7 @@ func TestPatchProject_MultiField(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPatch, "/api/v2/projects/my-project", bytes.NewBufferString(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("project_id", "my-project")
 	w := httptest.NewRecorder()
 
 	handler.patchProject(w, req)

@@ -29,6 +29,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
 	"oltp.molnett.org/neon-operator/test/fixtures"
 	"oltp.molnett.org/neon-operator/test/utils"
@@ -82,6 +84,22 @@ var _ = Describe("Manager", Ordered, func() {
 		)
 		_, err = utils.Run(cmd)
 		Expect(err).NotTo(HaveOccurred(), "Failed to deploy the controller-manager")
+
+		// Multi-node Kind clusters may experience TLS certificate verification
+		// failures during the discovery API call that underlies field-index
+		// registration due to certificate chain issues between the service-account
+		// CA and the API server certificate. Setting INSECURE_SKIP_VERIFY=true
+		// disables TLS verification on the entire REST config so that ALL manager
+		// components (client, cache, field indexer, dynamic REST mapper, etc.)
+		// use the same insecure transport.
+		By("enabling INSECURE_SKIP_VERIFY for Kind multi-node TLS workaround")
+		cmd = exec.Command("kubectl", "set", "env",
+			"deployment/neon-controller-manager",
+			"INSECURE_SKIP_VERIFY=true",
+			"-n", namespace,
+		)
+		_, err = utils.Run(cmd)
+		Expect(err).NotTo(HaveOccurred(), "Failed to set INSECURE_SKIP_VERIFY")
 	})
 
 	// After all tests have been executed, clean up by undeploying the controller, uninstalling CRDs,
@@ -112,7 +130,15 @@ var _ = Describe("Manager", Ordered, func() {
 		specReport := CurrentSpecReport()
 		if specReport.Failed() {
 			By("Fetching controller manager pod logs")
-			cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
+			// Use label selector so this works even when controllerPodName
+			// was not set (e.g. the Lifecycle test failed before the Manager
+			// test could discover the pod name).
+			var cmd *exec.Cmd
+			if controllerPodName != "" {
+				cmd = exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
+			} else {
+				cmd = exec.Command("kubectl", "logs", "-l", "control-plane=controller-manager", "-n", namespace, "--tail=500")
+			}
 			controllerLogs, err := utils.Run(cmd)
 			if err == nil {
 				_, _ = fmt.Fprintf(GinkgoWriter, "Controller logs:\n %s", controllerLogs)
@@ -151,6 +177,81 @@ var _ = Describe("Manager", Ordered, func() {
 
 	SetDefaultEventuallyTimeout(2 * time.Minute)
 	SetDefaultEventuallyPollingInterval(time.Second)
+
+	// The Neon Lifecycle test is placed before the Manager Context tests so
+	// that it runs first. On multi-node Kind clusters the metrics Service
+	// Endpoints may not resolve correctly (a known kindnet limitation), which
+	// would cause the Metrics test to fail and skip all subsequent Ordered
+	// specs. Running the Lifecycle test first ensures it always executes.
+	Context("Neon Lifecycle", func() {
+		BeforeEach(func() {
+			if skipLifecycleTests {
+				Skip("LIFECYCLE_TEST_SKIP is set; skipping lifecycle integration test")
+			}
+		})
+
+		AfterEach(func() {
+			if CurrentSpecReport().Failed() {
+				dumpLifecycleDiagnostics(namespace)
+			}
+		})
+
+		It("reconciles Cluster, Project, and Branch and accepts SELECT 1", func() {
+			ctx := context.Background()
+			cli := newE2EClient()
+
+			By("creating MinIO and storage-DB infrastructure")
+			createInfra(ctx, cli, namespace)
+			waitForDeploymentAvailable(ctx, cli, namespace, lifecycleStorageDBName, lifecycleAvailableTimeout)
+			waitForDeploymentAvailable(ctx, cli, namespace, lifecycleMinIOName, lifecycleAvailableTimeout)
+
+			By("creating the MinIO bucket")
+			ensureMinIOBucket(namespace)
+
+			By("creating Cluster")
+			cluster := fixtures.NewCluster(lifecycleClusterName, namespace)
+			Expect(cli.Create(ctx, cluster)).To(Succeed())
+			waitForCRAvailable(ctx, cli, cluster)
+
+			By("waiting for Cluster to auto-create Pageserver and Safekeepers")
+			// The Cluster controller auto-creates Pageserver/Safekeeper CRs using
+			// the naming convention "{clusterName}-pageserver-{id}" and
+			// "{clusterName}-safekeeper-{id}". Creating standalone CRs with the
+			// same Cluster+ID would cause ownerReferences conflicts because the
+			// spec generates identical resource names.
+			psName := fmt.Sprintf("%s-pageserver-%d", lifecycleClusterName, lifecyclePageserverID)
+			waitForCRAvailable(ctx, cli, &neonv1alpha1.Pageserver{
+				ObjectMeta: metav1.ObjectMeta{Name: psName, Namespace: namespace},
+			})
+			for _, id := range lifecycleSafekeeperIDs {
+				skName := fmt.Sprintf("%s-safekeeper-%d", lifecycleClusterName, id)
+				waitForCRAvailable(ctx, cli, &neonv1alpha1.Safekeeper{
+					ObjectMeta: metav1.ObjectMeta{Name: skName, Namespace: namespace},
+				})
+			}
+
+			By("creating Project")
+			project := fixtures.NewProject(lifecycleProjectName, namespace, lifecycleClusterName)
+			Expect(cli.Create(ctx, project)).To(Succeed())
+			waitForCRAvailable(ctx, cli, project)
+
+			By("creating Branch")
+			branch := fixtures.NewBranch(lifecycleBranchName, namespace, lifecycleProjectName)
+			Expect(cli.Create(ctx, branch)).To(Succeed())
+			waitForCRAvailable(ctx, cli, branch)
+
+			By("creating read_write Endpoint for Branch")
+			endpoint := fixtures.NewEndpoint(lifecycleEndpointName, namespace, lifecycleBranchName)
+			Expect(cli.Create(ctx, endpoint)).To(Succeed())
+			waitForCRAvailable(ctx, cli, endpoint)
+
+			By("waiting for compute pod readiness")
+			podName := waitForComputePodReady(ctx, cli, namespace, lifecycleBranchName)
+
+			By("running SELECT 1 against the compute pod")
+			execSelectOne(namespace, podName)
+		})
+	})
 
 	Context("Manager", func() {
 		It("should run successfully", func() {
@@ -233,6 +334,7 @@ var _ = Describe("Manager", Ordered, func() {
 						"containers": [{
 							"name": "curl",
 							"image": "curlimages/curl:latest",
+							"imagePullPolicy": "IfNotPresent",
 							"command": ["/bin/sh", "-c"],
 							"args": ["curl -v -k -H 'Authorization: Bearer %s' https://%s.%s.svc.cluster.local:8443/metrics"],
 							"securityContext": {
@@ -273,67 +375,6 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
-	})
-
-	Context("Neon Lifecycle", func() {
-		AfterEach(func() {
-			if CurrentSpecReport().Failed() {
-				dumpLifecycleDiagnostics(namespace)
-			}
-		})
-
-		It("reconciles Cluster, Project, and Branch and accepts SELECT 1", func() {
-			ctx := context.Background()
-			cli := newE2EClient()
-
-			By("creating MinIO and storage-DB infrastructure")
-			createInfra(ctx, cli, namespace)
-			waitForDeploymentAvailable(ctx, cli, namespace, lifecycleStorageDBName, lifecycleAvailableTimeout)
-			waitForDeploymentAvailable(ctx, cli, namespace, lifecycleMinIOName, lifecycleAvailableTimeout)
-
-			By("creating the MinIO bucket")
-			ensureMinIOBucket(namespace)
-
-			By("creating Cluster")
-			cluster := fixtures.NewCluster(lifecycleClusterName, namespace)
-			Expect(cli.Create(ctx, cluster)).To(Succeed())
-			waitForCRAvailable(ctx, cli, cluster)
-
-			By("creating Pageserver and Safekeepers")
-			pageserver := fixtures.NewPageserver(lifecyclePageserverName, namespace, lifecycleClusterName, lifecyclePageserverID)
-			Expect(cli.Create(ctx, pageserver)).To(Succeed())
-			safekeepers := make([]*neonv1alpha1.Safekeeper, 0, len(lifecycleSafekeeperIDs))
-			for _, id := range lifecycleSafekeeperIDs {
-				sk := fixtures.NewSafekeeper(fmt.Sprintf("safekeeper-e2e-%d", id), namespace, lifecycleClusterName, id)
-				Expect(cli.Create(ctx, sk)).To(Succeed())
-				safekeepers = append(safekeepers, sk)
-			}
-			waitForCRAvailable(ctx, cli, pageserver)
-			for _, sk := range safekeepers {
-				waitForCRAvailable(ctx, cli, sk)
-			}
-
-			By("creating Project")
-			project := fixtures.NewProject(lifecycleProjectName, namespace, lifecycleClusterName)
-			Expect(cli.Create(ctx, project)).To(Succeed())
-			waitForCRAvailable(ctx, cli, project)
-
-			By("creating Branch")
-			branch := fixtures.NewBranch(lifecycleBranchName, namespace, lifecycleProjectName)
-			Expect(cli.Create(ctx, branch)).To(Succeed())
-			waitForCRAvailable(ctx, cli, branch)
-
-			By("creating read_write Endpoint for Branch")
-			endpoint := fixtures.NewEndpoint(lifecycleEndpointName, namespace, lifecycleBranchName)
-			Expect(cli.Create(ctx, endpoint)).To(Succeed())
-			waitForCRAvailable(ctx, cli, endpoint)
-
-			By("waiting for compute pod readiness")
-			podName := waitForComputePodReady(ctx, cli, namespace, lifecycleBranchName)
-
-			By("running SELECT 1 against the compute pod")
-			execSelectOne(namespace, podName)
-		})
 	})
 })
 

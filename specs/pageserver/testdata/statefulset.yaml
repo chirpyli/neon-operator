@@ -131,6 +131,7 @@ spec:
         - /bin/sh
         - -c
         image: busybox:latest
+        imagePullPolicy: IfNotPresent
         name: setup-config
         resources: {}
         volumeMounts:

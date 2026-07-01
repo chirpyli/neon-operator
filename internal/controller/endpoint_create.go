@@ -112,7 +112,14 @@ func (r *EndpointReconciler) reconcileEndpointConfigMap(ctx context.Context, end
 func (r *EndpointReconciler) reconcileEndpointDeployment(ctx context.Context, endpoint *neonv1alpha1.Endpoint, branch *neonv1alpha1.Branch, project *neonv1alpha1.Project) error {
 	log := logf.FromContext(ctx)
 
-	intendedDeployment := compute.EndpointDeployment(endpoint, branch, project)
+	// Compute 镜像使用独立的 compute-node 镜像（含 compute_ctl），
+	// 与 cluster.Spec.NeonImage（含 pageserver/safekeeper 等）不同。
+	// Cluster.Spec.ComputeImage 为空时使用默认格式 neondatabase/compute-node-v{PGVersion}。
+	cluster, err := r.getCluster(ctx, project.Spec.ClusterName, branch.Namespace)
+	if err != nil {
+		return err
+	}
+	intendedDeployment := compute.EndpointDeployment(endpoint, branch, project, cluster.Spec.ComputeImage)
 
 	// 应用资源配置：Endpoint.Spec.Resources > Project.DefaultEndpointSettings > 默认
 	resources := getEffectiveResources(endpoint, project)
@@ -139,7 +146,7 @@ func (r *EndpointReconciler) reconcileEndpointDeployment(ctx context.Context, en
 		return fmt.Errorf("failed to get endpoint Deployment: %w", getErr)
 	}
 
-	err := ctrl.SetControllerReference(endpoint, intendedDeployment, r.Scheme)
+	err = ctrl.SetControllerReference(endpoint, intendedDeployment, r.Scheme)
 	if err != nil {
 		return fmt.Errorf("failed to set controller reference for endpoint Deployment: %w", err)
 	}
@@ -155,6 +162,45 @@ func (r *EndpointReconciler) reconcileEndpointDeployment(ctx context.Context, en
 	}
 
 	if !equality.Semantic.DeepDerivative(intendedDeployment.Spec, currentDeployment.Spec) {
+		// 如果 Deployment 尚未 Available 且 spec 差异仅在于 checksum annotation，
+		// 则跳过更新，避免不必要的滚动重启（首次创建时 SCRAM 异步就绪触发）。
+		if !utils.IsDeploymentAvailable(&currentDeployment) {
+			intendedAnnotations := intendedDeployment.Spec.Template.ObjectMeta.Annotations
+			currentAnnotations := currentDeployment.Spec.Template.ObjectMeta.Annotations
+
+			var intendedChecksum, currentChecksum string
+			if intendedAnnotations != nil {
+				intendedChecksum = intendedAnnotations["neon.oltp.molnett.org/spec-checksum"]
+			}
+			if currentAnnotations != nil {
+				currentChecksum = currentAnnotations["neon.oltp.molnett.org/spec-checksum"]
+			}
+
+			// 将 intended 的 checksum 临时替换为 current 的，重新比较
+			if intendedAnnotations != nil {
+				if currentChecksum == "" {
+					delete(intendedAnnotations, "neon.oltp.molnett.org/spec-checksum")
+				} else {
+					intendedAnnotations["neon.oltp.molnett.org/spec-checksum"] = currentChecksum
+				}
+			}
+
+			if equality.Semantic.DeepDerivative(intendedDeployment.Spec, currentDeployment.Spec) {
+				log.Info("Skipping Deployment update: not yet Available, only checksum differs",
+					"name", endpoint.Name)
+				return nil
+			}
+
+			// 恢复 intended checksum，继续正常更新流程
+			if intendedAnnotations != nil {
+				if intendedChecksum == "" {
+					delete(intendedAnnotations, "neon.oltp.molnett.org/spec-checksum")
+				} else {
+					intendedAnnotations["neon.oltp.molnett.org/spec-checksum"] = intendedChecksum
+				}
+			}
+		}
+
 		if err := r.Patch(ctx, intendedDeployment, client.Apply, &client.PatchOptions{
 			Force:        ptr.To(true),
 			FieldManager: utils.FieldManager,

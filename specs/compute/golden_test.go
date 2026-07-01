@@ -26,7 +26,7 @@ func TestSpecs(t *testing.T) {
 		name string
 		obj  any
 	}{
-		{"deployment", compute.Deployment(branch, project)},
+		{"deployment", compute.Deployment(branch, project, "")},
 		{"admin_service", compute.AdminService(branch, project)},
 		{"postgres_service", compute.PostgresService(branch, project, nil)},
 	}

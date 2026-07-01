@@ -107,9 +107,10 @@ func podSpec(ps *v1alpha1.Pageserver, image, serviceName string) corev1.PodSpec 
 		TerminationGracePeriodSeconds: ptr.To(int64(60)),
 		InitContainers: []corev1.Container{
 			{
-				Name:    "setup-config",
-				Image:   "busybox:latest",
-				Command: []string{"/bin/sh", "-c"},
+				Name:            "setup-config",
+				Image:           "busybox:latest",
+				ImagePullPolicy: corev1.PullIfNotPresent,
+				Command:         []string{"/bin/sh", "-c"},
 				Args: []string{
 					fmt.Sprintf(initScript,
 						ps.Spec.ID,

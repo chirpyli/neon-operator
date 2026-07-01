@@ -63,6 +63,11 @@ spec:
                     type: string
                 type: object
                 x-kubernetes-map-type: atomic
+              computeImage:
+                description: |-
+                  ComputeImage specifies the compute-node container image.
+                  When empty, defaults to neondatabase/compute-node-v{PGVersion}.
+                type: string
               defaultPGVersion:
                 description: |-
                   Default PostgreSQL version to use if no version is specified in projects.
