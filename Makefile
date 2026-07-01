@@ -1,9 +1,12 @@
-# Version for the operator image. Defaults to git describe, override with:
-#   make docker-build VERSION=v0.2.0
+# Version for the operator image. Automatically derived from git describe.
+# Each unique commit or dirty working tree gets a unique tag.
+# Override for a semantic release tag:
+#   make release VERSION=v0.2.0
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 
-# Image URL to use for building/pushing the operator image
-IMG_OPERATOR ?= neon-operator:$(VERSION)
+# Image URL to use for building/pushing the operator image.
+# Default matches config/manager/kustomization.yaml; override to use a different registry/tag.
+IMG_OPERATOR ?= 192.168.232.128:5000/neon/neon-operator:$(VERSION)
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -156,7 +159,7 @@ run: manifests generate fmt vet ## Run a controller from your host.
 # More info: https://docs.docker.com/develop/develop-images/build_enhancements/
 .PHONY: docker-build
 docker-build: build ## Build docker image for the operator.
-	$(CONTAINER_TOOL) build -t ${IMG_OPERATOR} -f Dockerfile.operator .
+	$(CONTAINER_TOOL) build --no-cache -t ${IMG_OPERATOR} -f Dockerfile.operator .
 
 .PHONY: docker-push
 docker-push: ## Push docker image for the operator.

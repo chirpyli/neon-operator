@@ -50,6 +50,7 @@ type BranchReconciler struct {
 	client.Client
 	Scheme                   *runtime.Scheme
 	StorageControllerBaseURL string
+	ScClient                 *SCClient
 }
 
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=branches,verbs=get;list;watch;create;update;patch;delete
@@ -216,13 +217,26 @@ func (r *BranchReconciler) getProject(ctx context.Context, projectID string, nam
 func (r *BranchReconciler) ensureTimeline(ctx context.Context, branch *neonv1alpha1.Branch, project *neonv1alpha1.Project) error {
 	log := logf.FromContext(ctx)
 
+	// 优先使用带 JWT 认证的 SCClient
+	if r.ScClient != nil {
+		err := r.ScClient.CreateTimeline(ctx, project.Spec.ClusterName, project.Namespace,
+			project.Spec.TenantID, branch.Spec.TimelineID, branch.Spec.PGVersion)
+		if err != nil {
+			log.Info("Failed to create timeline on storage controller", "error", err)
+			return err
+		}
+		log.Info("Successfully created timeline on storage controller")
+		return nil
+	}
+
+	// 兜底：无 ScClient 时使用裸 HTTP（测试等场景）
 	base := r.StorageControllerBaseURL
 	if base == "" {
 		base = storagecontroller.URL(project.Spec.ClusterName)
 	}
 	storageControllerURL := fmt.Sprintf("%s/v1/tenant/%s/timeline", base, project.Spec.TenantID)
 
-	log.Info("Sending request to storage controller", "url", storageControllerURL)
+	log.Info("Sending request to storage controller (unauthenticated)", "url", storageControllerURL)
 
 	requestBody := map[string]interface{}{
 		"new_timeline_id": branch.Spec.TimelineID,
@@ -312,7 +326,7 @@ func (r *BranchReconciler) finalize(ctx context.Context, branch *neonv1alpha1.Br
 	}
 
 	// 从 Storage Controller 删除 timeline
-	delErr := r.deleteTimeline(ctx, project.Spec.ClusterName, project.Spec.TenantID, branch.Spec.TimelineID)
+	delErr := r.deleteTimeline(ctx, project.Spec.ClusterName, project.Namespace, project.Spec.TenantID, branch.Spec.TimelineID)
 	if delErr != nil {
 		log.Error(delErr, "从 Storage Controller 删除 timeline 失败，将重试",
 			"branch", branch.Name, "tenantID", project.Spec.TenantID, "timelineID", branch.Spec.TimelineID)
@@ -331,18 +345,27 @@ func (r *BranchReconciler) finalize(ctx context.Context, branch *neonv1alpha1.Br
 	return r.removeFinalizer(ctx, branch)
 }
 
-// deleteTimeline 向 Storage Controller 发送 DELETE 请求以删除 timeline。
+// deleteTimeline 向 Storage Controller 发送 DELETE 请求以删除 timeline，携带 JWT 认证。
 // 将 404 视为成功（幂等性保证）。
-func (r *BranchReconciler) deleteTimeline(ctx context.Context, clusterName, tenantID, timelineID string) error {
+// namespace 用于读取 JWT 密钥 Secret。
+func (r *BranchReconciler) deleteTimeline(ctx context.Context, clusterName, namespace, tenantID, timelineID string) error {
 	log := logf.FromContext(ctx)
 
+	log.Info("Deleting timeline from Storage Controller", "tenantID", tenantID, "timelineID", timelineID)
+
+	// 优先使用带 JWT 认证的 SCClient
+	if r.ScClient != nil {
+		return r.ScClient.DeleteTimeline(ctx, clusterName, namespace, tenantID, timelineID)
+	}
+
+	// 兜底：无 ScClient 时使用裸 HTTP（测试等场景）
 	base := r.StorageControllerBaseURL
 	if base == "" {
 		base = storagecontroller.URL(clusterName)
 	}
 	deleteURL := fmt.Sprintf("%s/v1/tenant/%s/timeline/%s", base, tenantID, timelineID)
 
-	log.Info("Deleting timeline from Storage Controller", "url", deleteURL)
+	log.Info("Deleting timeline from Storage Controller (unauthenticated)", "url", deleteURL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, deleteURL, nil)
 	if err != nil {

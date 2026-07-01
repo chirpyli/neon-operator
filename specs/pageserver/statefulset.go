@@ -37,7 +37,7 @@ var DefaultResources = corev1.ResourceRequirements{
 	},
 }
 
-func StatefulSet(ps *v1alpha1.Pageserver, image string) *appsv1.StatefulSet {
+func StatefulSet(ps *v1alpha1.Pageserver, image string, safekeeperAuthToken string) *appsv1.StatefulSet {
 	name := Name(ps)
 	lbls := labels(ps)
 
@@ -77,14 +77,34 @@ func StatefulSet(ps *v1alpha1.Pageserver, image string) *appsv1.StatefulSet {
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: lbls,
 				},
-				Spec: podSpec(ps, image, name),
+				Spec: podSpec(ps, image, name, safekeeperAuthToken),
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{pvc},
 		},
 	}
 }
 
-func podSpec(ps *v1alpha1.Pageserver, image, serviceName string) corev1.PodSpec {
+func podSpec(ps *v1alpha1.Pageserver, image, serviceName, safekeeperAuthToken string) corev1.PodSpec {
+	var envVars []corev1.EnvVar
+	envVars = append(envVars,
+		corev1.EnvVar{Name: "RUST_LOG", Value: "info,pageserver=info,walredo=warn"},
+		corev1.EnvVar{Name: "DEFAULT_PG_VERSION", Value: "16"},
+		bucketEnv("AWS_ACCESS_KEY_ID", ps),
+		bucketEnv("AWS_SECRET_ACCESS_KEY", ps),
+		bucketEnv("AWS_REGION", ps),
+		bucketEnv("BUCKET_NAME", ps),
+		bucketEnv("AWS_ENDPOINT_URL", ps),
+	)
+	// NEON_AUTH_TOKEN is used for Pageserver → Safekeeper WAL connections.
+	// The token must have "safekeeperdata" scope. If empty (e.g. SK auth not yet
+	// enabled), the env var is omitted and the PS will not authenticate to SK.
+	if safekeeperAuthToken != "" {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "NEON_AUTH_TOKEN",
+			Value: safekeeperAuthToken,
+		})
+	}
+
 	return corev1.PodSpec{
 		SecurityContext: &corev1.PodSecurityContext{
 			RunAsUser:  ptr.To(int64(1000)),
@@ -133,15 +153,7 @@ func podSpec(ps *v1alpha1.Pageserver, image, serviceName string) corev1.PodSpec 
 					{Name: "pg", ContainerPort: 6400},
 					{Name: "http", ContainerPort: 9898},
 				},
-				Env: []corev1.EnvVar{
-					{Name: "RUST_LOG", Value: "info,pageserver=info,walredo=warn"},
-					{Name: "DEFAULT_PG_VERSION", Value: "16"},
-					bucketEnv("AWS_ACCESS_KEY_ID", ps),
-					bucketEnv("AWS_SECRET_ACCESS_KEY", ps),
-					bucketEnv("AWS_REGION", ps),
-					bucketEnv("BUCKET_NAME", ps),
-					bucketEnv("AWS_ENDPOINT_URL", ps),
-				},
+				Env: envVars,
 				// Health probes using /v1/status endpoint.
 				// Default parameters are aligned with SC heartbeat intervals:
 				// - Liveness:  ~30s detection window → matches max_offline_interval=30s
@@ -154,6 +166,7 @@ func podSpec(ps *v1alpha1.Pageserver, image, serviceName string) corev1.PodSpec 
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: storageVolumeName, MountPath: "/data/.neon/tenants"},
 					{Name: "config", MountPath: "/data/.neon"},
+					utils.JWTVolumeMount(),
 				},
 			},
 		},
@@ -172,6 +185,7 @@ func podSpec(ps *v1alpha1.Pageserver, image, serviceName string) corev1.PodSpec 
 					EmptyDir: &corev1.EmptyDirVolumeSource{},
 				},
 			},
+			utils.JWTVolume(ps.Spec.Cluster),
 		},
 	}
 }

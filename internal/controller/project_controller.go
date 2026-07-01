@@ -54,6 +54,7 @@ type ProjectReconciler struct {
 	client.Client
 	Scheme                   *runtime.Scheme
 	StorageControllerBaseURL string
+	ScClient                 *SCClient
 }
 
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=projects,verbs=get;list;watch;create;update;patch;delete
@@ -232,13 +233,26 @@ func (r *ProjectReconciler) updateTenantID(ctx context.Context, project *neonv1a
 func (r *ProjectReconciler) ensureTenantOnPageserver(ctx context.Context, project *neonv1alpha1.Project) error {
 	log := logf.FromContext(ctx)
 
+	// 优先使用带 JWT 认证的 SCClient
+	if r.ScClient != nil {
+		err := r.ScClient.CreateTenant(ctx, project.Spec.ClusterName, project.Namespace,
+			project.Spec.TenantID, "AttachedSingle", 1)
+		if err != nil {
+			log.Info("Storage controller returned error", "error", err)
+			return err
+		}
+		log.Info("Successfully created tenant on storage controller")
+		return nil
+	}
+
+	// 兜底：无 ScClient 时使用裸 HTTP（测试等场景）
 	base := r.StorageControllerBaseURL
 	if base == "" {
 		base = storagecontroller.URL(project.Spec.ClusterName)
 	}
 	storageControllerURL := fmt.Sprintf("%s/v1/tenant/%s/location_config", base, project.Spec.TenantID)
 
-	log.Info("Sending request to storage controller", "url", storageControllerURL)
+	log.Info("Sending request to storage controller (unauthenticated)", "url", storageControllerURL)
 
 	requestBody := []byte(`{"mode": "AttachedSingle", "generation": 1, "tenant_conf": {}}`)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, storageControllerURL, bytes.NewBuffer(requestBody))
@@ -297,7 +311,7 @@ func (r *ProjectReconciler) finalize(ctx context.Context, project *neonv1alpha1.
 		return r.removeFinalizer(ctx, project)
 	}
 
-	delErr := r.deleteTenant(ctx, project.Spec.ClusterName, project.Spec.TenantID)
+	delErr := r.deleteTenant(ctx, project.Spec.ClusterName, project.Namespace, project.Spec.TenantID)
 	if delErr != nil {
 		log.Error(delErr, "从 Storage Controller 删除 tenant 失败，将重试",
 			"project", project.Name, "tenantID", project.Spec.TenantID)
@@ -322,18 +336,27 @@ func (r *ProjectReconciler) finalize(ctx context.Context, project *neonv1alpha1.
 	return r.removeFinalizer(ctx, project)
 }
 
-// deleteTenant 向 Storage Controller 发送 DELETE 请求以删除 tenant。
+// deleteTenant 向 Storage Controller 发送 DELETE 请求以删除 tenant，携带 JWT 认证。
 // 将 404 视为成功（幂等性保证）。
-func (r *ProjectReconciler) deleteTenant(ctx context.Context, clusterName, tenantID string) error {
+// namespace 用于读取 JWT 密钥 Secret。
+func (r *ProjectReconciler) deleteTenant(ctx context.Context, clusterName, namespace, tenantID string) error {
 	log := logf.FromContext(ctx)
 
+	log.Info("Deleting tenant from Storage Controller", "tenantID", tenantID)
+
+	// 优先使用带 JWT 认证的 SCClient
+	if r.ScClient != nil {
+		return r.ScClient.DeleteTenant(ctx, clusterName, namespace, tenantID)
+	}
+
+	// 兜底：无 ScClient 时使用裸 HTTP（测试等场景）
 	base := r.StorageControllerBaseURL
 	if base == "" {
 		base = storagecontroller.URL(clusterName)
 	}
 	deleteURL := fmt.Sprintf("%s/v1/tenant/%s", base, tenantID)
 
-	log.Info("Deleting tenant from Storage Controller", "url", deleteURL)
+	log.Info("Deleting tenant from Storage Controller (unauthenticated)", "url", deleteURL)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, deleteURL, nil)
 	if err != nil {
@@ -372,6 +395,19 @@ const safekeeperHTTPPort = 7676
 func (r *ProjectReconciler) cleanupSafekeeperTenant(ctx context.Context, clusterName, namespace, tenantID string) {
 	log := logf.FromContext(ctx)
 
+	// safekeeper HTTP 管理 API 通过 --http-auth-public-key-path 配置了 JWT 校验，
+	// 需要生成 Bearer token 才能通过验证。
+	var jwtToken string
+	if r.ScClient != nil {
+		token, err := r.ScClient.SafekeeperHTTPToken(ctx, clusterName, namespace)
+		if err != nil {
+			log.Info("生成 safekeeper JWT token 失败，将尝试无认证请求",
+				"cluster", clusterName, "error", err)
+		} else {
+			jwtToken = token
+		}
+	}
+
 	var pods corev1.PodList
 	if err := r.List(ctx, &pods,
 		client.InNamespace(namespace),
@@ -406,6 +442,10 @@ func (r *ProjectReconciler) cleanupSafekeeperTenant(ctx context.Context, cluster
 		if err != nil {
 			log.Info("创建 safekeeper 清理请求失败", "url", url, "error", err)
 			continue
+		}
+
+		if jwtToken != "" {
+			req.Header.Set("Authorization", "Bearer "+jwtToken)
 		}
 
 		resp, err := httpClient.Do(req)

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"oltp.molnett.org/neon-operator/internal/controller"
 	"oltp.molnett.org/neon-operator/specs/compute"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -17,9 +18,10 @@ func addRoutes(
 	k8sClient client.Client,
 	computeBaseURL string,
 	namespace string,
+	nonCachedReader client.Reader,
 ) {
 	// 处理compute_ctl发送来的配置请求，compute_ctl根据此请求返回的配置信息，来配置postgres实例
-	mux.Handle("/compute/api/v2/computes/{compute_id}/spec", logRequests(log, handleComputeSpec(log, k8sClient)))
+	mux.Handle("/compute/api/v2/computes/{compute_id}/spec", logRequests(log, handleComputeSpec(log, k8sClient, nonCachedReader)))
 	mux.Handle("/healthz", logRequests(log, handleHealthCheck()))
 	mux.Handle("/readyz", logRequests(log, handleHealthCheck()))
 	mux.Handle("/notify-attach", logRequests(log, notifyAttach(log, k8sClient, computeBaseURL)))
@@ -68,12 +70,15 @@ func handleHealthCheck() http.Handler {
 	})
 }
 
-func handleComputeSpec(log *slog.Logger, k8sClient client.Client) http.Handler {
+func handleComputeSpec(log *slog.Logger, k8sClient client.Client, nonCachedReader client.Reader) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
 		computeID := r.PathValue("compute_id")
 
-		spec, err := compute.GenerateComputeSpec(r.Context(), log, k8sClient, nil, computeID)
+		// 使用带 JWT 认证的 SCClient 获取 tenant info
+		scClient := controller.NewSCClient(k8sClient, nonCachedReader, "")
+
+		spec, err := compute.GenerateComputeSpec(r.Context(), log, k8sClient, nil, computeID, scClient)
 		if err != nil {
 			log.Error("Failed to generate compute spec", "computeID", computeID, "error", err)
 			w.WriteHeader(http.StatusInternalServerError)

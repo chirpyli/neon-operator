@@ -116,6 +116,9 @@ spec:
           name: pageserver-storage
         - mountPath: /data/.neon
           name: config
+        - mountPath: /certs
+          name: jwt-keys
+          readOnly: true
       initContainers:
       - args:
         - |
@@ -150,6 +153,13 @@ spec:
         name: pageserver-config
       - emptyDir: {}
         name: config
+      - name: jwt-keys
+        secret:
+          defaultMode: 292
+          items:
+          - key: public.pem
+            path: public.pem
+          secretName: cluster-test-cluster-jwt
   updateStrategy: {}
   volumeClaimTemplates:
   - metadata:

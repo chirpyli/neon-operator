@@ -19,7 +19,6 @@ spec:
     spec:
       containers:
       - args:
-        - --dev
         - -l
         - 0.0.0.0:8080
         - --control-plane-url
@@ -29,6 +28,15 @@ spec:
         command:
         - storage_controller
         env:
+        - name: PUBLIC_KEY
+          value: '-----BEGIN PUBLIC KEY-----MCowBQYDK2VwAyEAebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=-----END
+            PUBLIC KEY-----'
+        - name: PAGESERVER_JWT_TOKEN
+          value: eyJhbGciOiJFZERTQSJ9.dummy
+        - name: CONTROL_PLANE_JWT_TOKEN
+          value: eyJhbGciOiJFZERTQSJ9.dummy
+        - name: SAFEKEEPER_JWT_TOKEN
+          value: eyJhbGciOiJFZERTQSJ9.dummy
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
@@ -68,4 +76,16 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
           timeoutSeconds: 5
+        volumeMounts:
+        - mountPath: /certs
+          name: jwt-keys
+          readOnly: true
+      volumes:
+      - name: jwt-keys
+        secret:
+          defaultMode: 292
+          items:
+          - key: public.pem
+            path: public.pem
+          secretName: cluster-test-cluster-jwt
 status: {}

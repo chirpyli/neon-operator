@@ -25,6 +25,9 @@ type ControlPlane struct {
 	// Namespace is the Kubernetes namespace where CRDs are managed.
 	// Defaults to "" (all namespaces). Set via WATCH_NAMESPACE env.
 	Namespace string
+	// NonCachedReader bypasses the informer cache for cluster-scoped reads
+	// (e.g. Node object). Used by the SCClient for JWT-authenticated SC API calls.
+	NonCachedReader client.Reader
 }
 
 // Start implements manager.Runnable. The manager invokes it after caches sync
@@ -40,7 +43,7 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 		return fmt.Errorf("controlplane: BindAddr is required")
 	}
 
-	srv := newServer(cp.Log, cp.Client, cp.ComputeBaseURL, cp.Namespace)
+	srv := newServer(cp.Log, cp.Client, cp.ComputeBaseURL, cp.Namespace, cp.NonCachedReader)
 	httpServer := &http.Server{
 		Addr:              cp.BindAddr,
 		Handler:           srv,
@@ -65,10 +68,10 @@ func (cp *ControlPlane) Start(ctx context.Context) error {
 	}
 }
 
-func newServer(log *slog.Logger, k8sClient client.Client, computeBaseURL string, namespace string) http.Handler {
+func newServer(log *slog.Logger, k8sClient client.Client, computeBaseURL string, namespace string, nonCachedReader client.Reader) http.Handler {
 	mux := http.NewServeMux()
 
-	addRoutes(mux, log, k8sClient, computeBaseURL, namespace)
+	addRoutes(mux, log, k8sClient, computeBaseURL, namespace, nonCachedReader)
 
 	return mux
 }

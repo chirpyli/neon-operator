@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -15,6 +16,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
+	"oltp.molnett.org/neon-operator/specs/compute"
 	"oltp.molnett.org/neon-operator/specs/safekeeper"
 	"oltp.molnett.org/neon-operator/specs/storagecontroller"
 	"oltp.molnett.org/neon-operator/utils"
@@ -87,7 +89,7 @@ type schedulingPolicyRequest struct {
 //
 // This remains stable even when the pod is rescheduled to a different node.
 //
-// Uses JWT with Scope::Infra for authentication.
+// Uses JWT with "admin" scope (SC master key) for authentication.
 func (c *SCClient) RegisterSafekeeper(ctx context.Context, sk *neonv1alpha1.Safekeeper) error {
 	log := logf.FromContext(ctx)
 
@@ -124,7 +126,7 @@ func (c *SCClient) RegisterSafekeeper(ctx context.Context, sk *neonv1alpha1.Safe
 // DecommissionSafekeeper calls POST /control/v1/safekeeper/:id/scheduling_policy
 // to set the safekeeper's scheduling policy to Decomissioned.
 //
-// Uses JWT with Scope::Admin for authentication.
+// Uses JWT with "admin" scope (SC master key) for authentication.
 //
 // SC handles:
 //  1. Stop the per-safekeeper reconciler
@@ -172,7 +174,7 @@ func (c *SCClient) doRequest(ctx context.Context, namespace, clusterName, method
 
 	// Add JWT authentication (skipped in tests where fake SC doesn't validate)
 	if !c.SkipAuth {
-		token, err := c.generateJWT(ctx, clusterName, namespace)
+		token, err := c.adminJWT(ctx, clusterName, namespace)
 		if err != nil {
 			return fmt.Errorf("generate JWT token: %w", err)
 		}
@@ -199,12 +201,20 @@ func (c *SCClient) doRequest(ctx context.Context, namespace, clusterName, method
 
 // generateJWT creates a signed JWT token for authenticating with the storage controller.
 // It reads the cluster's Ed25519 private key from the JWT secret (in the cluster namespace)
-// and signs a token with both "infra" and "admin" scopes.
+// and signs a token with the given scope.
+//
+// The scope must be a valid upstream Scope enum value (lowercase, e.g. "admin", "infra",
+// "generations_api"). See libs/utils/src/auth.rs in the upstream neon repo.
+//
+// The SC implements an "Admin master key" mechanism: if a request's scope doesn't match
+// the required scope for an endpoint, SC falls back to checking whether the scope is
+// Admin — and if so, allows the request. This means "admin" scope can access all SC
+// endpoints, which we use as a simple unified approach for the operator.
 //
 // Delegates to utils.JWTManager for key loading and signing, keeping the
 // single Ed25519 signing implementation shared with compute token generation.
-func (c *SCClient) generateJWT(ctx context.Context, clusterName, namespace string) (string, error) {
-	secretName := fmt.Sprintf("cluster-%s-jwt", clusterName)
+func (c *SCClient) generateJWT(ctx context.Context, clusterName, namespace, scope string) (string, error) {
+	secretName := utils.JWTSecretName(clusterName)
 
 	var secret corev1.Secret
 	if err := c.k8sClient.Get(ctx, types.NamespacedName{
@@ -225,10 +235,27 @@ func (c *SCClient) generateJWT(ctx context.Context, clusterName, namespace strin
 		"sub":   clusterName,
 		"iat":   now.Unix(),
 		"exp":   now.Add(5 * time.Minute).Unix(),
-		"scope": "infra admin",
+		"scope": scope,
 	}
 
 	return jm.GenerateToken(claims)
+}
+
+// adminJWT generates a JWT with "admin" scope, which is the SC master key
+// that can access all SC management endpoints.
+func (c *SCClient) adminJWT(ctx context.Context, clusterName, namespace string) (string, error) {
+	return c.generateJWT(ctx, clusterName, namespace, "admin")
+}
+
+// SafekeeperHTTPToken generates a JWT token for authenticating with the
+// safekeeper HTTP management API (port 7676). The safekeeper validates
+// tokens using the same Ed25519 public key as the storage controller
+// (configured via --http-auth-public-key-path).
+//
+// Uses "admin" scope which is accepted by all safekeeper HTTP endpoints
+// through the same master key mechanism.
+func (c *SCClient) SafekeeperHTTPToken(ctx context.Context, clusterName, namespace string) (string, error) {
+	return c.adminJWT(ctx, clusterName, namespace)
 }
 
 // =============================================================================
@@ -401,7 +428,7 @@ func (c *SCClient) doRequestGet(ctx context.Context, namespace, clusterName, url
 	req.Header.Set("Content-Type", "application/json")
 
 	if !c.SkipAuth {
-		token, err := c.generateJWT(ctx, clusterName, namespace)
+		token, err := c.adminJWT(ctx, clusterName, namespace)
 		if err != nil {
 			return nil, fmt.Errorf("generate JWT token: %w", err)
 		}
@@ -424,6 +451,92 @@ func (c *SCClient) doRequestGet(ctx context.Context, namespace, clusterName, url
 	}
 
 	return nil, fmt.Errorf("storage controller returned %d: %s", resp.StatusCode, string(respBody))
+}
+
+// DeleteTenant calls DELETE /v1/tenant/:tenant_id to delete a tenant from the
+// storage controller. Returns nil on 200 or 404 (idempotent).
+func (c *SCClient) DeleteTenant(ctx context.Context, clusterName, namespace, tenantID string) error {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/v1/tenant/%s", baseURL, tenantID)
+
+	err := c.doRequest(ctx, namespace, clusterName, http.MethodDelete, url, nil)
+	if err != nil && isSCNotFound(err) {
+		return nil // 404 = already deleted, idempotent success
+	}
+	return err
+}
+
+// DeleteTimeline calls DELETE /v1/tenant/:tenant_id/timeline/:timeline_id to
+// delete a timeline from the storage controller. Returns nil on 200 or 404.
+func (c *SCClient) DeleteTimeline(ctx context.Context, clusterName, namespace, tenantID, timelineID string) error {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/v1/tenant/%s/timeline/%s", baseURL, tenantID, timelineID)
+
+	err := c.doRequest(ctx, namespace, clusterName, http.MethodDelete, url, nil)
+	if err != nil && isSCNotFound(err) {
+		return nil // 404 = already deleted, idempotent success
+	}
+	return err
+}
+
+// CreateTenant calls PUT /v1/tenant/:tenant_id/location_config to create or
+// configure a tenant on the storage controller.
+func (c *SCClient) CreateTenant(ctx context.Context, clusterName, namespace, tenantID string, mode string, generation int) error {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/v1/tenant/%s/location_config", baseURL, tenantID)
+
+	body := map[string]interface{}{
+		"mode":        mode,
+		"generation":  generation,
+		"tenant_conf": map[string]interface{}{},
+	}
+	return c.doRequest(ctx, namespace, clusterName, http.MethodPut, url, body)
+}
+
+// CreateTimeline calls POST /v1/tenant/:tenant_id/timeline to create a timeline
+// on the storage controller. Returns nil on 2xx or 409 (Conflict = already exists).
+func (c *SCClient) CreateTimeline(ctx context.Context, clusterName, namespace, tenantID, timelineID string, pgVersion int) error {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/v1/tenant/%s/timeline", baseURL, tenantID)
+
+	body := map[string]interface{}{
+		"new_timeline_id": timelineID,
+		"pg_version":      pgVersion,
+	}
+	err := c.doRequest(ctx, namespace, clusterName, http.MethodPost, url, body)
+	if err != nil && isSCConflict(err) {
+		return nil // 409 = timeline already exists, idempotent success
+	}
+	return err
+}
+
+// GetTenantInfo calls GET /control/v1/tenant/:tenant_id to retrieve tenant
+// shard information from the storage controller. Implements compute.TenantInfoGetter.
+func (c *SCClient) GetTenantInfo(ctx context.Context, clusterName, namespace, tenantID string) (*compute.TenantInfo, error) {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/control/v1/tenant/%s", baseURL, tenantID)
+
+	respBody, err := c.doRequestGet(ctx, namespace, clusterName, url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tenant info: %w", err)
+	}
+
+	var info compute.TenantInfo
+	if err := json.Unmarshal(respBody, &info); err != nil {
+		return nil, fmt.Errorf("failed to decode tenant info: %w", err)
+	}
+
+	return &info, nil
+}
+
+// isSCNotFound checks whether the error message indicates a 404 from the SC.
+func isSCNotFound(err error) bool {
+	return strings.Contains(err.Error(), "returned 404")
+}
+
+// isSCConflict checks whether the error message indicates a 409 from the SC.
+func isSCConflict(err error) bool {
+	return strings.Contains(err.Error(), "returned 409")
 }
 
 // getNodeAvailabilityZone reads the K8s node topology label to determine

@@ -446,7 +446,7 @@ func TestHandleComputeSpec(t *testing.T) {
 
 			// Create handler
 			mux := http.NewServeMux()
-			mux.Handle("/compute/api/v2/computes/{compute_id}/spec", handleComputeSpec(logger, k8sClient))
+			mux.Handle("/compute/api/v2/computes/{compute_id}/spec", handleComputeSpec(logger, k8sClient, nil))
 
 			// Create test request
 			req := httptest.NewRequest(http.MethodGet, "/compute/api/v2/computes/"+tt.computeID+"/spec", nil)

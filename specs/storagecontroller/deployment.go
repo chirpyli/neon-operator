@@ -12,7 +12,7 @@ import (
 	"oltp.molnett.org/neon-operator/utils"
 )
 
-func Deployment(cluster *v1alpha1.Cluster) *appsv1.Deployment {
+func Deployment(cluster *v1alpha1.Cluster, publicKeyPEM, pageserverToken, controlPlaneToken, safekeeperToken string) *appsv1.Deployment {
 	storageControllerName := Name(cluster.Name)
 
 	probes := cluster.Spec.StorageControllerProbes
@@ -49,6 +49,9 @@ func Deployment(cluster *v1alpha1.Cluster) *appsv1.Deployment {
 					},
 				},
 				Spec: corev1.PodSpec{
+					Volumes: []corev1.Volume{
+						utils.JWTVolume(cluster.Name),
+					},
 					Containers: []corev1.Container{
 						{
 							Name:            "storage-controller",
@@ -58,7 +61,6 @@ func Deployment(cluster *v1alpha1.Cluster) *appsv1.Deployment {
 								"storage_controller",
 							},
 							Args: []string{
-								"--dev",
 								"-l",
 								fmt.Sprintf("0.0.0.0:%d", Port),
 								"--control-plane-url",
@@ -67,6 +69,22 @@ func Deployment(cluster *v1alpha1.Cluster) *appsv1.Deployment {
 								"0",
 							},
 							Env: []corev1.EnvVar{
+								{
+									Name:  "PUBLIC_KEY",
+									Value: publicKeyPEM,
+								},
+								{
+									Name:  "PAGESERVER_JWT_TOKEN",
+									Value: pageserverToken,
+								},
+								{
+									Name:  "CONTROL_PLANE_JWT_TOKEN",
+									Value: controlPlaneToken,
+								},
+								{
+									Name:  "SAFEKEEPER_JWT_TOKEN",
+									Value: safekeeperToken,
+								},
 								{
 									Name: "DATABASE_URL",
 									ValueFrom: &corev1.EnvVarSource{
@@ -84,6 +102,9 @@ func Deployment(cluster *v1alpha1.Cluster) *appsv1.Deployment {
 									Name:          "http",
 									ContainerPort: Port,
 								},
+							},
+							VolumeMounts: []corev1.VolumeMount{
+								utils.JWTVolumeMount(),
 							},
 							// Health probes using upstream SC endpoints.
 							// /live  checks startup_complete AND is_leader (non-leaders return 503).

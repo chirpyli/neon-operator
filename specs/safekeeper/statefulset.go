@@ -106,6 +106,11 @@ func podSpec(sk *v1alpha1.Safekeeper, image string) corev1.PodSpec {
 					"--listen-http=0.0.0.0:7676",
 					"--advertise-pg=" + advertiseHost + ":5454",
 					"--datadir=/data",
+					// JWT authentication for WAL service (pg port).
+					// Pageserver connects to this port with "safekeeperdata" scope token.
+					"--pg-auth-public-key-path=/certs/public.pem",
+					// JWT authentication for HTTP management API.
+					"--http-auth-public-key-path=/certs/public.pem",
 				},
 				Ports: []corev1.ContainerPort{
 					{Name: "pg", ContainerPort: 5454},
@@ -113,6 +118,7 @@ func podSpec(sk *v1alpha1.Safekeeper, image string) corev1.PodSpec {
 				},
 				VolumeMounts: []corev1.VolumeMount{
 					{Name: storageVolumeName, MountPath: "/data"},
+					utils.JWTVolumeMount(),
 				},
 				// Health probes using /v1/status (the only unauthenticated endpoint).
 				// Default parameters are aligned with SC heartbeat intervals:
@@ -133,6 +139,9 @@ func podSpec(sk *v1alpha1.Safekeeper, image string) corev1.PodSpec {
 					},
 				},
 			},
+		},
+		Volumes: []corev1.Volume{
+			utils.JWTVolume(sk.Spec.Cluster),
 		},
 	}
 }

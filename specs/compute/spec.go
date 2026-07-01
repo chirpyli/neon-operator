@@ -160,6 +160,12 @@ type ComputeSpecResponse struct {
 	Status           string           `json:"status"`
 }
 
+// TenantInfoGetter provides tenant shard information from the storage controller.
+// Implemented by SCClient (with JWT auth) and StorageControllerClient (bare HTTP).
+type TenantInfoGetter interface {
+	GetTenantInfo(ctx context.Context, clusterName, namespace, tenantID string) (*TenantInfo, error)
+}
+
 func RefreshConfiguration(ctx context.Context,
 	log *slog.Logger,
 	k8sClient client.Client,
@@ -176,7 +182,7 @@ func RefreshConfiguration(ctx context.Context,
 		return fmt.Errorf("failed to extract clustername from deployment: %w", err)
 	}
 
-	spec, err := GenerateComputeSpec(ctx, log, k8sClient, &request, computeId)
+	spec, err := GenerateComputeSpec(ctx, log, k8sClient, &request, computeId, nil)
 	if err != nil {
 		return fmt.Errorf("failed to generate compute spec: %w", err)
 	}
@@ -267,13 +273,17 @@ func extractComputeID(deployment *appsv1.Deployment) (string, error) {
 	return "", fmt.Errorf("failed to extract compute ID from annotations")
 }
 
-// GenerateComputeSpec generates a compute specification JSON response
+// GenerateComputeSpec generates a compute specification JSON response.
+// tenantInfoGetter is used for the /spec path to fetch shard info from the
+// storage controller. Pass nil to use the bare HTTP StorageControllerClient
+// (legacy / test path); pass an SCClient for JWT-authenticated requests.
 func GenerateComputeSpec(
 	ctx context.Context,
 	log *slog.Logger,
 	k8sClient client.Client,
 	request *ComputeHookNotifyRequest,
 	computeID string,
+	tenantInfoGetter TenantInfoGetter,
 ) (*ComputeSpecResponse, error) {
 	log.Info("Starting compute spec generation", "compute_id", computeID)
 
@@ -373,13 +383,19 @@ func GenerateComputeSpec(
 		actualRequest = request
 	} else {
 		// /spec 路径：需从 storage-controller 获取 shard 信息
-		storageClient := NewStorageControllerClient(clusterName)
+		// 优先使用 JWT-authenticated TenantInfoGetter，兜底裸 HTTP
+		namespace := deployment.Namespace
 
 		// Layer 2: 重试获取 TenantInfo，最多 3 次，间隔 1s/2s/4s 退避
 		var tenantInfo *TenantInfo
 		var lastErr error
 		for attempt := 0; attempt < 3; attempt++ {
-			tenantInfo, lastErr = storageClient.GetTenantInfo(ctx, log, tenantID)
+			if tenantInfoGetter != nil {
+				tenantInfo, lastErr = tenantInfoGetter.GetTenantInfo(ctx, clusterName, namespace, tenantID)
+			} else {
+				storageClient := NewStorageControllerClient(clusterName)
+				tenantInfo, lastErr = storageClient.GetTenantInfo(ctx, log, tenantID)
+			}
 			if lastErr == nil {
 				break
 			}
@@ -419,7 +435,7 @@ func GenerateComputeSpec(
 				ComputeCtlConfig: ComputeCtlConfig{
 					JWKS: jwks,
 				},
-				Status: "Empty",
+				Status: "empty",
 			}, nil // ← 返回 nil error，HTTP 层返回 200 而非 500
 		}
 
@@ -544,7 +560,10 @@ func RefreshSafekeepersConfiguration(ctx context.Context,
 		return fmt.Errorf("failed to extract clustername from deployment: %w", err)
 	}
 
-	spec, err := GenerateComputeSpec(ctx, log, k8sClient, nil, computeId)
+	// 传入空 ComputeHookNotifyRequest 避免进入 SC 查询路径。
+	// RefreshSafekeepersConfiguration 只需基础 spec 结构，safekeeper connstrings
+	// 会随后被直接覆盖，因此无需从 Storage Controller 获取 shard 信息。
+	spec, err := GenerateComputeSpec(ctx, log, k8sClient, &ComputeHookNotifyRequest{}, computeId, nil)
 	if err != nil {
 		return fmt.Errorf("failed to generate compute spec: %w", err)
 	}
@@ -731,11 +750,20 @@ func listSafekeeperIDs(ctx context.Context, k8sClient client.Client, clusterName
 	return ids, nil
 }
 
-// StorageControllerClient placeholder
+// StorageControllerClient provides bare HTTP (unauthenticated) access to the
+// Storage Controller. Deprecated: use controller.SCClient instead, which
+// authenticates all requests with JWT tokens. This client remains only for
+// backward compatibility in tests and when SCClient is unavailable.
+//
+// Deprecated: 所有生产路径已切换至 controller.SCClient（带 JWT 认证）。
+// 此类型仅保留作为 GenerateComputeSpec 中 tenantInfoGetter==nil 时的兜底路径。
 type StorageControllerClient struct {
 	clusterName string
 }
 
+// NewStorageControllerClient creates a bare HTTP client to the storage controller.
+//
+// Deprecated: use controller.NewSCClient instead for JWT-authenticated access.
 func NewStorageControllerClient(clusterName string) *StorageControllerClient {
 	return &StorageControllerClient{clusterName: clusterName}
 }
@@ -750,6 +778,9 @@ type ShardInfo struct {
 	NodeAttached uint64 `json:"node_attached"`
 }
 
+// GetTenantInfo calls GET /control/v1/tenant/{tenantID} with bare HTTP (no JWT).
+//
+// Deprecated: use controller.SCClient.GetTenantInfo instead for JWT-authenticated access.
 func (c *StorageControllerClient) GetTenantInfo(
 	ctx context.Context,
 	log *slog.Logger,

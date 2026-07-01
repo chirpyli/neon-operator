@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -114,12 +115,14 @@ func (r *EndpointReconciler) reconcileEndpointDeployment(ctx context.Context, en
 
 	// Compute 镜像使用独立的 compute-node 镜像（含 compute_ctl），
 	// 与 cluster.Spec.NeonImage（含 pageserver/safekeeper 等）不同。
-	// Cluster.Spec.ComputeImage 为空时使用默认格式 neondatabase/compute-node-v{PGVersion}。
+	// 优先使用 Cluster.Spec.ComputeImage；为空时从 NeonImage 提取 registry 前缀，
+	// 优先从本地 registry 拉取，避免依赖 Docker Hub。
 	cluster, err := r.getCluster(ctx, project.Spec.ClusterName, branch.Namespace)
 	if err != nil {
 		return err
 	}
-	intendedDeployment := compute.EndpointDeployment(endpoint, branch, project, cluster.Spec.ComputeImage)
+	computeImage := deriveComputeImage(cluster.Spec.ComputeImage, cluster.Spec.NeonImage, branch.Spec.PGVersion)
+	intendedDeployment := compute.EndpointDeployment(endpoint, branch, project, computeImage)
 
 	// 应用资源配置：Endpoint.Spec.Resources > Project.DefaultEndpointSettings > 默认
 	resources := getEffectiveResources(endpoint, project)
@@ -343,4 +346,30 @@ func configMapDataChecksum(data map[string]string) string {
 		h.Write([]byte(v))
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// deriveComputeImage 确定 Compute 容器镜像，优先使用本地 registry。
+//
+// 策略：
+//  1. computeImage 非空 → 直接使用（用户显式指定）
+//  2. neonImage 含 registry 前缀（如 192.168.232.128:5000/neondatabase/neon:8463）
+//     → 提取 registry 前缀，构造 {registry}/neondatabase/compute-node-v{PGVersion}
+//  3. neonImage 无 registry 前缀（如 neondatabase/neon:8463）
+//     → 退化为 neondatabase/compute-node-v{PGVersion}（Docker Hub）
+func deriveComputeImage(computeImage, neonImage string, pgVersion int) string {
+	if computeImage != "" {
+		return computeImage
+	}
+
+	// 从 neonImage 提取 registry 前缀
+	// 例: "192.168.232.128:5000/neondatabase/neon:8463" → parts = ["192.168.232.128:5000", "neondatabase", "neon:8463"]
+	// 例: "neondatabase/neon:8463"              → parts = ["neondatabase", "neon:8463"]
+	parts := strings.SplitN(neonImage, "/", 3)
+	if len(parts) >= 3 {
+		// 有 registry 前缀，复用同一个 registry
+		return fmt.Sprintf("%s/%s/compute-node-v%d", parts[0], parts[1], pgVersion)
+	}
+
+	// 无 registry 前缀，退化为 Docker Hub 默认
+	return fmt.Sprintf("neondatabase/compute-node-v%d", pgVersion)
 }

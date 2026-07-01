@@ -22,10 +22,10 @@ func TestSpecs(t *testing.T) {
 		name string
 		obj  any
 	}{
-		{"statefulset", pageserver.StatefulSet(ps, fixtures.DefaultNeonImage)},
+		{"statefulset", pageserver.StatefulSet(ps, fixtures.DefaultNeonImage, "")},
 		{"service", pageserver.Service(ps)},
 		{"headless_service", pageserver.HeadlessService(ps)},
-		{"configmap", pageserver.ConfigMap(ps, bucket)},
+		{"configmap", pageserver.ConfigMap(ps, bucket, "")},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

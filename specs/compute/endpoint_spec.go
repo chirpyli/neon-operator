@@ -26,8 +26,10 @@ var endpointLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOption
 // =============================================================================
 
 // EndpointDeployment 为 Endpoint 构建 Deployment。
-// image 指定使用的 compute 容器镜像（如 cluster.Spec.NeonImage），
-// 默认为 neondatabase/compute-node-v{PGVersion}。
+// image 指定使用的 compute 容器镜像。
+// 调用方应通过 deriveComputeImage() 自动推导镜像地址：
+// 优先使用 Cluster.Spec.ComputeImage，为空时从 Cluster.Spec.NeonImage 提取
+// registry 前缀构造本地 registry 路径，兜底为 neondatabase/compute-node-v{PGVersion}。
 func EndpointDeployment(endpoint *neonv1alpha1.Endpoint, branch *neonv1alpha1.Branch, project *neonv1alpha1.Project, image string) *appsv1.Deployment {
 	if image == "" {
 		image = fmt.Sprintf("neondatabase/compute-node-v%d", branch.Spec.PGVersion)

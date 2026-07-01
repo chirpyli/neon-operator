@@ -246,15 +246,17 @@ func main() {
 		os.Exit(1)
 	}
 	if err := (&controller.BranchReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		ScClient: controller.NewSCClient(mgr.GetClient(), mgr.GetAPIReader(), ""),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Branch")
 		os.Exit(1)
 	}
 	if err := (&controller.ProjectReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		ScClient: controller.NewSCClient(mgr.GetClient(), mgr.GetAPIReader(), ""),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Project")
 		os.Exit(1)
@@ -362,10 +364,11 @@ func main() {
 	}
 
 	if err := mgr.Add(&controlplane.ControlPlane{
-		Log:       slog.New(slog.NewJSONHandler(os.Stdout, nil)),
-		Client:    mgr.GetClient(),
-		BindAddr:  controlplaneAddr,
-		Namespace: os.Getenv("WATCH_NAMESPACE"),
+		Log:             slog.New(slog.NewJSONHandler(os.Stdout, nil)),
+		Client:          mgr.GetClient(),
+		BindAddr:        controlplaneAddr,
+		Namespace:       os.Getenv("WATCH_NAMESPACE"),
+		NonCachedReader: mgr.GetAPIReader(),
 	}); err != nil {
 		setupLog.Error(err, "unable to add controlplane runnable")
 		os.Exit(1)

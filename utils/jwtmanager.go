@@ -4,8 +4,10 @@ import (
 	"crypto/ed25519"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"fmt"
+	"time"
 
 	"github.com/lestrrat-go/jwx/v3/jwa"
 	"github.com/lestrrat-go/jwx/v3/jwt"
@@ -93,6 +95,45 @@ func (jm *JWTManager) VerifyToken(tokenString string) (jwt.Token, error) {
 	return jwt.Parse([]byte(tokenString), jwt.WithKey(jwa.EdDSA(), jm.publicKey))
 }
 
+// Scope values matching upstream neon libs/utils/src/auth.rs Scope enum serialization.
+// Scope is a single-value enum with #[serde(rename_all = "lowercase")].
+const (
+	ScopeAdmin          = "admin"
+	ScopeInfra          = "infra"
+	ScopeGenerationsAPI = "generations_api"
+	ScopePageServerAPI  = "pageserverapi"
+	ScopeSafekeeperData = "safekeeperdata"
+	ScopeTenant         = "tenant"
+)
+
+// GenerateScopeToken creates a long-lived JWT with the given scope.
+// Used for component-to-component authentication (e.g. PS → SC upcall, PS → SK WAL).
+func (jm *JWTManager) GenerateScopeToken(clusterName, scope string, expireIn time.Duration) (string, error) {
+	now := time.Now()
+	claims := map[string]any{
+		"iss":   "neon-operator",
+		"sub":   clusterName,
+		"scope": scope,
+		"iat":   now.Unix(),
+		"exp":   now.Add(expireIn).Unix(),
+	}
+	return jm.GenerateToken(claims)
+}
+
+// GenerateUpcallToken creates a token with "generations_api" scope for PS → SC upcall.
+func GenerateUpcallToken(jm *JWTManager, clusterName string) (string, error) {
+	return jm.GenerateScopeToken(clusterName, ScopeGenerationsAPI, TokenDefaultLifetime)
+}
+
+// GenerateSafekeeperToken creates a token with "safekeeperdata" scope for PS → SK WAL auth.
+func GenerateSafekeeperToken(jm *JWTManager, clusterName string) (string, error) {
+	return jm.GenerateScopeToken(clusterName, ScopeSafekeeperData, TokenDefaultLifetime)
+}
+
+// TokenDefaultLifetime 是组件认证 JWT 的默认有效期（365 天）。
+// Token 会持久化到 JWT Secret 中，跨 reconcile 复用。
+const TokenDefaultLifetime = 365 * 24 * time.Hour
+
 type JWKResponse struct {
 	Keys []*JWK `json:"keys"`
 }
@@ -106,6 +147,12 @@ type JWK struct {
 	Kty    string   `json:"kty"`
 	Crv    string   `json:"crv"`
 	X      string   `json:"x"`
+}
+
+// PublicKeyHex 返回 Ed25519 公钥的十六进制编码字符串。
+// neon 组件通过 --public-key 参数期望这种格式。
+func (jm *JWTManager) PublicKeyHex() string {
+	return hex.EncodeToString(jm.publicKey)
 }
 
 func (jm *JWTManager) ToJWK() *JWK {

@@ -42,6 +42,8 @@ spec:
         - --listen-http=0.0.0.0:7676
         - --advertise-pg=test-cluster-safekeeper-1-0.test-cluster-safekeeper-1-headless.neon.svc.cluster.local:5454
         - --datadir=/data
+        - --pg-auth-public-key-path=/certs/public.pem
+        - --http-auth-public-key-path=/certs/public.pem
         command:
         - /usr/local/bin/safekeeper
         image: neondatabase/neon:8463
@@ -88,11 +90,22 @@ spec:
         volumeMounts:
         - mountPath: /data
           name: safekeeper-storage
+        - mountPath: /certs
+          name: jwt-keys
+          readOnly: true
       securityContext:
         fsGroup: 1000
         runAsGroup: 1000
         runAsUser: 1000
       terminationGracePeriodSeconds: 30
+      volumes:
+      - name: jwt-keys
+        secret:
+          defaultMode: 292
+          items:
+          - key: public.pem
+            path: public.pem
+          secretName: cluster-test-cluster-jwt
   updateStrategy: {}
   volumeClaimTemplates:
   - metadata:

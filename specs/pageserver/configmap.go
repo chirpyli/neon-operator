@@ -11,7 +11,7 @@ import (
 	"oltp.molnett.org/neon-operator/specs/storagecontroller"
 )
 
-func ConfigMap(ps *v1alpha1.Pageserver, bucketSecret *corev1.Secret) *corev1.ConfigMap {
+func ConfigMap(ps *v1alpha1.Pageserver, bucketSecret *corev1.Secret, controlPlaneAPIToken string) *corev1.ConfigMap {
 	pageserverToml := fmt.Sprintf(`
 # ===== 网络 =====
 listen_pg_addr = "0.0.0.0:6400"
@@ -29,6 +29,13 @@ broker_keepalive_interval = "5s"
 
 # ===== 控制平面 =====
 control_plane_api = "%s/upcall/v1/"
+%s
+
+# ===== 认证 =====
+http_auth_type = "NeonJWT"
+pg_auth_type = "Trust"
+grpc_auth_type = "NeonJWT"
+auth_validation_public_key_path = "/certs/public.pem"
 
 # ===== PostgreSQL 分发目录 =====
 pg_distrib_dir = "/usr/local/"
@@ -67,6 +74,7 @@ metric_collection_interval = "60s"
 `,
 		storagebroker.URL(ps.Spec.Cluster),
 		storagecontroller.URL(ps.Spec.Cluster),
+		controlPlaneAPITokenLine(controlPlaneAPIToken),
 		string(bucketSecret.Data["BUCKET_NAME"]),
 		string(bucketSecret.Data["AWS_REGION"]),
 		string(bucketSecret.Data["AWS_ENDPOINT_URL"]),
@@ -86,4 +94,13 @@ metric_collection_interval = "60s"
 			"pageserver.toml": pageserverToml,
 		},
 	}
+}
+
+// controlPlaneAPITokenLine returns the toml line for control_plane_api_token,
+// or empty string if the token is empty.
+func controlPlaneAPITokenLine(token string) string {
+	if token == "" {
+		return ""
+	}
+	return fmt.Sprintf(`control_plane_api_token = "%s"`, token)
 }

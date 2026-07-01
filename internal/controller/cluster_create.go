@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -205,7 +206,31 @@ func (r *ClusterReconciler) reconcileJWTKeys(ctx context.Context, cluster *neonv
 }
 
 func (r *ClusterReconciler) reconcileStorageController(ctx context.Context, cluster *neonv1alpha1.Cluster) error {
-	dep := storagecontroller.Deployment(cluster)
+	// 读取 JWT Secret，提取公钥 PEM 和组件 token。
+	// SC 二进制通过环境变量读取密钥（PUBLIC_KEY、PAGESERVER_JWT_TOKEN 等）。
+	var jwtSecret corev1.Secret
+	if err := r.Get(ctx, client.ObjectKey{
+		Name:      utils.JWTSecretName(cluster.Name),
+		Namespace: cluster.Namespace,
+	}, &jwtSecret); err != nil {
+		return err
+	}
+	jm, err := utils.NewJWTManagerFromSecret(&jwtSecret)
+	if err != nil {
+		return fmt.Errorf("create JWT manager: %w", err)
+	}
+
+	// 去除换行符，以便安全地通过环境变量传递
+	publicKeyPEM := strings.ReplaceAll(string(jwtSecret.Data["public.pem"]), "\n", "")
+	publicKeyPEM = strings.ReplaceAll(publicKeyPEM, "\r", "")
+
+	// 获取或生成组件 JWT token（持久化到 Secret 中，避免重复生成导致抖动）。
+	tokens, err := r.ensureComponentTokens(ctx, cluster, jm, &jwtSecret)
+	if err != nil {
+		return fmt.Errorf("ensure component tokens: %w", err)
+	}
+
+	dep := storagecontroller.Deployment(cluster, publicKeyPEM, tokens.pageserver, tokens.controlPlane, tokens.safekeeper)
 	if err := utils.ReconcileSSA(ctx, r.Client, r.Scheme, cluster, dep, func(cur *appsv1.Deployment) bool {
 		return !equality.Semantic.DeepDerivative(dep.Spec, cur.Spec)
 	}); err != nil {
@@ -216,6 +241,62 @@ func (r *ClusterReconciler) reconcileStorageController(ctx context.Context, clus
 	return utils.ReconcileSSA(ctx, r.Client, r.Scheme, cluster, svc, func(cur *corev1.Service) bool {
 		return !equality.Semantic.DeepDerivative(svc.Spec, cur.Spec)
 	})
+}
+
+type componentTokens struct {
+	pageserver, controlPlane, safekeeper string
+}
+
+// ensureComponentTokens 从 Secret 中读取组件 JWT token，如果不存在则生成并持久化。
+// 避免每次 reconcile 都重新签发 token，导致 Deployment 频繁更新、ReplicaSet 大量堆积。
+func (r *ClusterReconciler) ensureComponentTokens(
+	ctx context.Context,
+	cluster *neonv1alpha1.Cluster,
+	jm *utils.JWTManager,
+	secret *corev1.Secret,
+) (*componentTokens, error) {
+	log := logf.FromContext(ctx)
+
+	tokens := &componentTokens{
+		pageserver:   string(secret.Data["pageserver_token"]),
+		controlPlane: string(secret.Data["control_plane_token"]),
+		safekeeper:   string(secret.Data["safekeeper_token"]),
+	}
+
+	// If all tokens exist, reuse them to keep the Deployment spec stable.
+	if tokens.pageserver != "" && tokens.controlPlane != "" && tokens.safekeeper != "" {
+		return tokens, nil
+	}
+
+	log.Info("正在生成新的组件 JWT token 并持久化到 Secret")
+
+	var err error
+	tokens.pageserver, err = jm.GenerateScopeToken(cluster.Name, utils.ScopeAdmin, utils.TokenDefaultLifetime)
+	if err != nil {
+		return nil, fmt.Errorf("generate pageserver token: %w", err)
+	}
+	tokens.controlPlane, err = jm.GenerateScopeToken(cluster.Name, utils.ScopeAdmin, utils.TokenDefaultLifetime)
+	if err != nil {
+		return nil, fmt.Errorf("generate control plane token: %w", err)
+	}
+	tokens.safekeeper, err = jm.GenerateScopeToken(cluster.Name, utils.ScopeAdmin, utils.TokenDefaultLifetime)
+	if err != nil {
+		return nil, fmt.Errorf("generate safekeeper token: %w", err)
+	}
+
+	// 持久化到 Secret，后续 reconcile 直接复用。
+	if secret.Data == nil {
+		secret.Data = make(map[string][]byte)
+	}
+	secret.Data["pageserver_token"] = []byte(tokens.pageserver)
+	secret.Data["control_plane_token"] = []byte(tokens.controlPlane)
+	secret.Data["safekeeper_token"] = []byte(tokens.safekeeper)
+
+	if err := r.Update(ctx, secret); err != nil {
+		return nil, fmt.Errorf("persist component tokens to secret: %w", err)
+	}
+
+	return tokens, nil
 }
 
 func (r *ClusterReconciler) reconcileStorageBroker(ctx context.Context, cluster *neonv1alpha1.Cluster) error {
