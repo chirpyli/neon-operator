@@ -31,6 +31,7 @@ func addAPIRoutes(mux *http.ServeMux, svc *apiService, log *slog.Logger) {
 	// ---------- Endpoints ----------
 	mux.Handle("POST /api/v2/projects/{project_id}/endpoints", logRequests(log, http.HandlerFunc(api.createEndpoint)))
 	mux.Handle("GET /api/v2/projects/{project_id}/endpoints", logRequests(log, http.HandlerFunc(api.listEndpoints)))
+	mux.Handle("GET /api/v2/projects/{project_id}/branches/{branch_id}/endpoints", logRequests(log, http.HandlerFunc(api.listBranchEndpoints)))
 	mux.Handle("GET /api/v2/projects/{project_id}/endpoints/{endpoint_id}", logRequests(log, http.HandlerFunc(api.getEndpoint)))
 	mux.Handle("DELETE /api/v2/projects/{project_id}/endpoints/{endpoint_id}", logRequests(log, http.HandlerFunc(api.deleteEndpoint)))
 	mux.Handle("PATCH /api/v2/projects/{project_id}/endpoints/{endpoint_id}", logRequests(log, http.HandlerFunc(api.patchEndpoint)))
@@ -329,6 +330,19 @@ func (h *apiHandler) listEndpoints(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("project_id")
 
 	resp, err := h.svc.ListEndpoints(r.Context(), projectID)
+	if err != nil {
+		h.handleAPIError(w, err)
+		return
+	}
+
+	_ = writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *apiHandler) listBranchEndpoints(w http.ResponseWriter, r *http.Request) {
+	projectID := r.PathValue("project_id")
+	branchID := r.PathValue("branch_id")
+
+	resp, err := h.svc.ListEndpointsForBranch(r.Context(), projectID, branchID)
 	if err != nil {
 		h.handleAPIError(w, err)
 		return

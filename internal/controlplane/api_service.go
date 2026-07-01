@@ -1061,6 +1061,45 @@ func (s *apiService) ListEndpoints(ctx context.Context, projectID string) (*Endp
 	return &EndpointListResponse{Endpoints: endpoints}, nil
 }
 
+// ListEndpointsForBranch 列出指定分支的所有端点
+func (s *apiService) ListEndpointsForBranch(ctx context.Context, projectID, branchID string) (*EndpointListResponse, error) {
+	// 校验 branch 属于 project
+	branch := &neonv1.Branch{}
+	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: branchID, Namespace: s.namespace}, branch); err != nil {
+		if isNotFound(err) {
+			return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not found")
+		}
+		return nil, fmt.Errorf("get branch: %w", err)
+	}
+	if branch.Spec.ProjectID != projectID {
+		return nil, newError("BRANCH_NOT_FOUND", "branch '"+branchID+"' not in project '"+projectID+"'")
+	}
+
+	list := &neonv1.EndpointList{}
+	if err := s.k8sClient.List(ctx, list, client.InNamespace(s.namespace)); err != nil {
+		return nil, fmt.Errorf("list endpoints: %w", err)
+	}
+
+	endpoints := make([]EndpointResponse, 0)
+	for _, ep := range list.Items {
+		if ep.Spec.BranchID != branchID {
+			continue
+		}
+		endpoints = append(endpoints, EndpointResponse{
+			ID:           ep.Name,
+			BranchID:     ep.Spec.BranchID,
+			Type:         ep.Spec.Type,
+			Host:         ep.Status.Host,
+			Port:         ep.Status.Port,
+			CurrentState: ep.Status.Phase,
+			Disabled:     ep.Spec.Disabled,
+			CreatedAt:    ep.CreationTimestamp.Time,
+		})
+	}
+
+	return &EndpointListResponse{Endpoints: endpoints}, nil
+}
+
 // DeleteEndpoint 删除端点
 func (s *apiService) DeleteEndpoint(ctx context.Context, projectID, endpointID string) (*DeleteResponse, error) {
 	endpoint := &neonv1.Endpoint{}
