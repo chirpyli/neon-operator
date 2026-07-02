@@ -19,6 +19,7 @@
 ### Controller
 
 该 Operator 并发运行多个 Controller：
+
 - **Cluster Controller**：管理 NeonCluster 资源及整体集群状态
 - **Project Controller**：处理 Neon 项目生命周期
 - **Branch Controller**：管理项目内的数据库分支（纯 timeline 容器，不创建计算资源）
@@ -29,6 +30,7 @@ Controller 位于 `internal/controller/` 目录下，每个 Controller 都实现
 ## 开发命令
 
 ### 构建与运行
+
 ```bash
 # 构建 Operator 的 Docker 镜像
 make docker-build
@@ -38,6 +40,7 @@ make run
 ```
 
 ### 测试
+
 ```bash
 # 运行单元测试
 make test
@@ -47,6 +50,7 @@ make test-e2e
 ```
 
 ### CRD 管理
+
 ```bash
 # 从 Go 代码生成 CRD
 make generate
@@ -56,6 +60,7 @@ make install
 ```
 
 ### 代码质量
+
 ```bash
 # 使用 Go fmt 格式化代码
 make fmt
@@ -66,6 +71,7 @@ make fmt
 **重要提示**：该 Operator 当前要求主 Neon 仓库克隆到本仓库的相邻目录下，构建才能正常进行。Neon 仓库需要至少执行一次 `make`。
 
 目录结构应为：
+
 ```
 parent-directory/
 ├── neon/             # 主 Neon 仓库
@@ -75,12 +81,15 @@ parent-directory/
 ## 运行时配置
 
 Operator 在 8080 端口上暴露 HTTP 接口：
+
 - `/health` — 健康检查端点
 - `/metrics` — Prometheus 指标
 - `/` — 诊断信息
 
 ## neon源码
+
 获取neon相关的内容，可通过源码进行分析：
+
 - neon github仓库为：https://github.com/neondatabase/neon.git
 - neon 本地源码为：/home/postgres/works/opensource/neon
 
@@ -91,5 +100,5 @@ Operator 在 8080 端口上暴露 HTTP 接口：
 代码注释请用中文注释
 
 深度调研：
-neon: /home/postgres/works/opensource/neon  
+neon: /home/postgres/works/opensource/neon
 neon api: https://api-docs.neon.tech/reference/getting-started-with-neon-api

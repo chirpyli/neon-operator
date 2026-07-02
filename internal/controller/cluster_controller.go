@@ -49,7 +49,8 @@ var ErrRequeueAfterChange = errors.New("requeue after change")
 // ClusterReconciler reconciles a Cluster object
 type ClusterReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme   *runtime.Scheme
+	SCClient *SCClient // 集群删除时用于清理 SC 节点记录
 }
 
 // +kubebuilder:rbac:groups=neon.oltp.molnett.org,resources=clusters,verbs=get;list;watch;create;update;patch;delete
@@ -322,9 +323,21 @@ func (r *ClusterReconciler) finalize(ctx context.Context, cluster *neonv1alpha1.
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Step 3: 所有依赖已清除，移除 Cluster Finalizer
-	log.Info("所有依赖 Project 已清除，移除 Cluster Finalizer",
+	// Step 3: 所有依赖已清除，清理 SC 节点记录并移除 Cluster Finalizer
+	log.Info("所有依赖 Project 已清除，准备清理 SC 节点并移除 Cluster Finalizer",
 		"cluster", cluster.Name)
+
+	// Step 3a: 强制下线所有 SC 节点（兜底清理）
+	// SC 节点记录（nodes + safekeepers）通过外部 PostgreSQL 持久化，
+	// 跨集群生命周期存在。如果不在 Cluster 删除时主动清理：
+	//   - Pageserver: 残留 Active 节点 → 重建时 re-attach 409 Conflict
+	//   - Safekeeper: 残留 Active 记录 → 重建时可能分配到已不存在的节点
+	if r.SCClient != nil {
+		r.cleanupPageserverNodes(ctx, cluster)
+		r.cleanupSafekeeperNodes(ctx, cluster)
+	}
+
+	// Step 3b: 移除 Cluster Finalizer
 
 	// 重新获取以规避冲突
 	current := &neonv1alpha1.Cluster{}
@@ -348,6 +361,91 @@ func (r *ClusterReconciler) finalize(ctx context.Context, cluster *neonv1alpha1.
 	log.Info("Finalizer 已移除，Cluster 将由 APIServer 删除",
 		"cluster", cluster.Name)
 	return ctrl.Result{}, nil
+}
+
+// cleanupPageserverNodes 在 Cluster 删除前强制下线所有 Pageserver 节点。
+//
+// SC 使用外部 PostgreSQL 数据库持久化节点记录（Nodes 表），
+// 节点采用 Tombstone 机制（lifecycle='Deleted'）而非物理删除。
+// 如果不在 Cluster 删除时清理节点记录：
+//   - 节点以 lifecycle='Active' 残留在 SC 数据库
+//   - 重建同名 Cluster 时，SC 加载旧节点记录
+//   - Pageserver re-attach 时地址不匹配 → 409 Conflict → 永远 Not Ready
+//
+// 本方法调用 PUT /control/v1/node/{id}/delete?force=true，
+// 跳过优雅 drain，直接标记节点为 Deleting 并执行 tombstone。
+// 由于 Project 已全部清理（tenant/timeline 已删除），
+// 此时节点上不应有任何 attached shard，force 删除是安全的。
+func (r *ClusterReconciler) cleanupPageserverNodes(ctx context.Context, cluster *neonv1alpha1.Cluster) {
+	log := logf.FromContext(ctx)
+
+	var pss neonv1alpha1.PageserverList
+	if err := r.List(ctx, &pss,
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels{pageserverspec.ClusterLabel: cluster.Name},
+	); err != nil {
+		log.Error(err, "Cluster 终止清理：列出 Pageserver 失败，跳过 SC 节点清理")
+		return
+	}
+
+	for _, ps := range pss.Items {
+		// 跳过已在删除中的 Pageserver
+		if !ps.DeletionTimestamp.IsZero() {
+			continue
+		}
+
+		log.Info("Cluster 终止清理：强制下线 Pageserver 节点",
+			"nodeID", ps.Spec.ID, "pageserver", ps.Name)
+
+		// force=true：跳过优雅 drain，直接标记 tombstone
+		if err := r.SCClient.StartNodeDelete(ctx, cluster.Name, cluster.Namespace, ps.Spec.ID, true); err != nil {
+			log.Error(err, "Cluster 终止清理：StartNodeDelete 失败（非阻塞）",
+				"nodeID", ps.Spec.ID, "pageserver", ps.Name)
+		} else {
+			log.Info("Cluster 终止清理：节点已提交 tombstone",
+				"nodeID", ps.Spec.ID, "pageserver", ps.Name)
+		}
+	}
+}
+
+// cleanupSafekeeperNodes 在 Cluster 删除前强制 Decommission 所有 Safekeeper 节点。
+//
+// 与 Pageserver 的 nodes 表不同，SC 的 safekeepers 表没有 Tombstone 机制——
+// scheduling_policy 状态机（Active/Activating/Pause/Decomissioned）是唯一的生命周期管理手段。
+//
+// 如果不在 Cluster 删除时清理：
+//   - safekeeper 记录以 scheduling_policy='Active' 残留在 SC 数据库
+//   - SC 的 safekeepers_for_new_timeline 调度算法中，
+//     Active 但 unreachable 的节点仍可能被分配新 timeline（排在候选列表末尾）
+//   - 畸形 AZ 分布场景下可能向已不存在的节点写入数据
+//
+// 本方法调用 POST /control/v1/safekeeper/:id/scheduling_policy，
+// 设置 SchedulingPolicy=Decomissioned。
+// SC 会停止该节点的 reconciler、跳过心跳、排除调度。
+func (r *ClusterReconciler) cleanupSafekeeperNodes(ctx context.Context, cluster *neonv1alpha1.Cluster) {
+	log := logf.FromContext(ctx)
+
+	var sks neonv1alpha1.SafekeeperList
+	if err := r.List(ctx, &sks,
+		client.InNamespace(cluster.Namespace),
+		client.MatchingLabels{safekeeperspec.ClusterLabel: cluster.Name},
+	); err != nil {
+		log.Error(err, "Cluster 终止清理：列出 Safekeeper 失败，跳过 SC 节点 Decommission")
+		return
+	}
+
+	for _, sk := range sks.Items {
+		log.Info("Cluster 终止清理：Decommission Safekeeper",
+			"id", sk.Spec.ID, "safekeeper", sk.Name)
+
+		if err := r.SCClient.DecommissionSafekeeper(ctx, &sk); err != nil {
+			log.Error(err, "Cluster 终止清理：DecommissionSafekeeper 失败（非阻塞）",
+				"id", sk.Spec.ID, "safekeeper", sk.Name)
+		} else {
+			log.Info("Cluster 终止清理：Safekeeper 已 Decommission",
+				"id", sk.Spec.ID, "safekeeper", sk.Name)
+		}
+	}
 }
 
 // SetupWithManager sets up the controller with the Manager.

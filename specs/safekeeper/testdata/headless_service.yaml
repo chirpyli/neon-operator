@@ -21,6 +21,7 @@ spec:
     port: 7676
     protocol: TCP
     targetPort: 0
+  publishNotReadyAddresses: true
   selector:
     molnett.org/safekeeper: test-safekeeper
 status:

@@ -155,8 +155,9 @@ func (r *SafekeeperReconciler) reconcile(ctx context.Context, safekeeper *neonv1
 // 在移除 Finalizer 之前，向 Storage Controller 发送 Decomissioned 调度策略请求。
 // SC 会停止该 safekeeper 的 reconciler 和心跳监控，将其从调度中移除。
 //
-// 如果 SC 不可达，仅记录日志警告，不阻塞删除——SC 会通过心跳超时
-// 自行检测 safekeeper 消失。
+// v1.6: SC 不可达时不再直接移除 finalizer。检查 Cluster CR 是否存在来决定行为：
+//   - Cluster 仍存在 → SC 临时不可达 → Requeue 重试
+//   - Cluster 已删除 → SC 已不可恢复 → 移除 finalizer（Cluster finalizer 的 cleanupSafekeeperNodes 已兜底处理）
 func (r *SafekeeperReconciler) finalize(ctx context.Context, sk *neonv1alpha1.Safekeeper) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -167,11 +168,21 @@ func (r *SafekeeperReconciler) finalize(ctx context.Context, sk *neonv1alpha1.Sa
 	log.Info("正在终止 Safekeeper 删除，向 Storage Controller 发送 Decomissioned 请求",
 		"safekeeper", sk.Name, "id", sk.Spec.ID)
 
-	// 步骤1：在 SC 中标记 Decomissioned（尽力而为）
+	// 步骤1：在 SC 中标记 Decomissioned
 	if err := r.SCClient.DecommissionSafekeeper(ctx, sk); err != nil {
-		// SC 不可达不是致命错误——它会通过心跳超时自行检测
-		log.Info("SC Decommission 失败，继续删除流程",
-			"error", err, "id", sk.Spec.ID)
+		// SC 不可达时，判断 Cluster CR 是否存在
+		clusterCR := &neonv1alpha1.Cluster{}
+		crErr := r.Get(ctx, types.NamespacedName{Name: sk.Spec.Cluster, Namespace: sk.Namespace}, clusterCR)
+		if crErr != nil && apierrors.IsNotFound(crErr) {
+			// Cluster 已删除，SC 不再存在，无法执行任何 SC 操作。
+			// Cluster finalizer 的 cleanupSafekeeperNodes 应在删除前已完成 decommission。
+			log.Info("Cluster 已删除，SC 不可达，跳过 Safekeeper Decommission", "error", err)
+		} else {
+			// SC 存在但暂时不可达：保留 finalizer，稍后重试。
+			// 不再像旧代码那样直接跳过（会导致 scheduling_policy 保持 Active）。
+			log.Info("无法连接 SC 进行 Safekeeper Decommission，保留 finalizer 稍后重试", "error", err)
+			return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+		}
 	}
 
 	// 步骤2：移除 Finalizer，允许 K8s 删除资源

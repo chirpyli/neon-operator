@@ -238,9 +238,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// 创建共享 SCClient，用于所有需要与 Storage Controller 通信的 controller。
+	// ClusterReconciler 在集群删除时需要它来清理 SC 节点记录（兜底 tombstone），
+	// Pageserver/Safekeeper/Branch/Project 等 controller 也需要它进行资源注册/注销。
+	scClient := controller.NewSCClient(mgr.GetClient(), mgr.GetAPIReader(), "")
+
 	if err := (&controller.ClusterReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		SCClient: scClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Cluster")
 		os.Exit(1)
@@ -248,7 +254,7 @@ func main() {
 	if err := (&controller.BranchReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		ScClient: controller.NewSCClient(mgr.GetClient(), mgr.GetAPIReader(), ""),
+		ScClient: scClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Branch")
 		os.Exit(1)
@@ -256,7 +262,7 @@ func main() {
 	if err := (&controller.ProjectReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		ScClient: controller.NewSCClient(mgr.GetClient(), mgr.GetAPIReader(), ""),
+		ScClient: scClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Project")
 		os.Exit(1)
@@ -264,7 +270,7 @@ func main() {
 	if err := (&controller.PageserverReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		SCClient: controller.NewSCClient(mgr.GetClient(), mgr.GetAPIReader(), ""),
+		SCClient: scClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Pageserver")
 		os.Exit(1)
@@ -276,7 +282,7 @@ func main() {
 		// objects (Node) — the informer cache cannot sync Node objects when
 		// the operator lacks node RBAC, which would block all safekeeper
 		// reconciles behind the stalled cached-client Get call.
-		SCClient: controller.NewSCClient(mgr.GetClient(), mgr.GetAPIReader(), ""),
+		SCClient: scClient,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Safekeeper")
 		os.Exit(1)

@@ -27,8 +27,9 @@ func service(sk *v1alpha1.Safekeeper, name, clusterIP string) *corev1.Service {
 			Labels:    labels(sk),
 		},
 		Spec: corev1.ServiceSpec{
-			ClusterIP: clusterIP,
-			Selector:  selectorLabels(sk),
+			ClusterIP:                clusterIP,
+			PublishNotReadyAddresses: clusterIP == corev1.ClusterIPNone,
+			Selector:                 selectorLabels(sk),
 			Ports: []corev1.ServicePort{
 				{Name: "pg", Port: 5454, Protocol: corev1.ProtocolTCP},
 				{Name: "http", Port: 7676, Protocol: corev1.ProtocolTCP},

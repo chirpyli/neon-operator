@@ -7,8 +7,10 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/lestrrat-go/jwx/v3/jwa"
@@ -157,9 +159,35 @@ func GenerateSafekeeperToken(jm *JWTManager, clusterName string) (string, error)
 	return jm.GenerateScopeToken(clusterName, ScopeSafekeeperData, TokenDefaultLifetime)
 }
 
-// TokenDefaultLifetime 是组件认证 JWT 的默认有效期（365 天）。
+// IsTokenExpired 解码 JWT payload（不验证签名），检查 exp 是否已过期。
+// 用于 ensureComponentTokens 中判断是否需要重新签发 token。
+func (jm *JWTManager) IsTokenExpired(tokenString string) bool {
+	parts := strings.Split(tokenString, ".")
+	if len(parts) != 3 {
+		return true // malformed, treat as expired
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return true
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return true
+	}
+	if claims.Exp == 0 {
+		return true // no exp claim, treat as expired for safety
+	}
+	return time.Now().Unix() > claims.Exp
+}
+
+// TokenDefaultLifetime 是组件认证 JWT 的默认有效期（10 年）。
 // Token 会持久化到 JWT Secret 中，跨 reconcile 复用。
-const TokenDefaultLifetime = 365 * 24 * time.Hour
+// 使用较长的有效期配合 IsTokenExpired 过期检测机制，确保：
+//   - 正常情况：token 长期有效，避免频繁滚动更新
+//   - 过期场景：ensureComponentTokens 检测到过期后自动重新签发
+const TokenDefaultLifetime = 3650 * 24 * time.Hour
 
 type JWKResponse struct {
 	Keys []*JWK `json:"keys"`

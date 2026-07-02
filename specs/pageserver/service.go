@@ -27,8 +27,9 @@ func service(ps *v1alpha1.Pageserver, name, clusterIP string) *corev1.Service {
 			Labels:    labels(ps),
 		},
 		Spec: corev1.ServiceSpec{
-			ClusterIP: clusterIP,
-			Selector:  selectorLabels(ps),
+			ClusterIP:                clusterIP,
+			PublishNotReadyAddresses: clusterIP == corev1.ClusterIPNone,
+			Selector:                 selectorLabels(ps),
 			Ports: []corev1.ServicePort{
 				{Name: "pg", Port: 6400, Protocol: corev1.ProtocolTCP},
 				{Name: "http", Port: 9898, Protocol: corev1.ProtocolTCP},

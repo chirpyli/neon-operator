@@ -90,9 +90,14 @@ var _ = BeforeSuite(func() {
 	})
 	Expect(err).NotTo(HaveOccurred())
 
+	// 创建测试用 SCClient，所有 controller 共享
+	testSCClient := NewSCClient(mgr.GetClient(), nil, storconFake.URL())
+	testSCClient.SkipAuth = true
+
 	Expect((&ClusterReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		SCClient: testSCClient,
 	}).SetupWithManager(mgr)).To(Succeed())
 
 	Expect((&ProjectReconciler{
@@ -108,17 +113,15 @@ var _ = BeforeSuite(func() {
 	}).SetupWithManager(mgr)).To(Succeed())
 
 	Expect((&PageserverReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		SCClient: testSCClient,
 	}).SetupWithManager(mgr)).To(Succeed())
-
-	scClient := NewSCClient(mgr.GetClient(), nil, storconFake.URL())
-	scClient.SkipAuth = true
 
 	Expect((&SafekeeperReconciler{
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
-		SCClient: scClient,
+		SCClient: testSCClient,
 	}).SetupWithManager(mgr)).To(Succeed())
 	// +kubebuilder:scaffold:builder
 

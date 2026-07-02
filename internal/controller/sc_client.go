@@ -441,6 +441,21 @@ func (c *SCClient) CancelNodeDelete(ctx context.Context, clusterName, namespace 
 	return c.doRequest(ctx, namespace, clusterName, http.MethodDelete, url, nil)
 }
 
+// DeleteTombstone 调用 DELETE /debug/v1/tombstone/:node_id
+// 物理删除 SC 数据库中已标记为 lifecycle='Deleted' 的节点记录。
+// 前置条件：节点必须已经经过 tombstone（PUT /node/{id}/delete 完成）。
+// 权限要求：Admin scope。
+//
+// 该端点用于 Clean Slate 重建场景：旧集群删除后，
+// SC 数据库中的 tombstone 记录会阻止同名节点重新注册，
+// 通过物理删除 tombstone 可清除此限制。
+func (c *SCClient) DeleteTombstone(ctx context.Context, clusterName, namespace string, nodeID uint64) error {
+	baseURL := c.baseURL(clusterName)
+	url := fmt.Sprintf("%s/debug/v1/tombstone/%d", baseURL, nodeID)
+
+	return c.doRequest(ctx, namespace, clusterName, http.MethodDelete, url, nil)
+}
+
 // doRequestGet 发送一个带认证的 GET 请求，返回响应体。
 func (c *SCClient) doRequestGet(ctx context.Context, namespace, clusterName, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

@@ -188,8 +188,26 @@ func (r *PageserverReconciler) finalize(ctx context.Context, ps *neonv1alpha1.Pa
 	// Phase 0: 准入检查 — 检查节点状态 + 是否有其他可调度节点
 	allNodes, err := r.SCClient.ListNodeNodes(ctx, clusterName, ps.Namespace)
 	if err != nil {
-		log.Info("无法连接 SC 进行准入检查，跳过 drain 继续删除", "error", err)
-		return r.removePageserverFinalizer(ctx, ps)
+		// 判断 SC 是否永久不可达（Cluster CR 已删除 = SC 已被 cascade 删除）
+		clusterCR := &neonv1alpha1.Cluster{}
+		crErr := r.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: ps.Namespace}, clusterCR)
+		if crErr != nil && apierrors.IsNotFound(crErr) {
+			// Cluster 已删除，SC 不再存在，无法执行任何 SC 清理。
+			// Cluster finalizer 应在删除前已完成节点 tombstone（见 B3 修复），
+			// 此处作为最后兜底：直接移除 finalizer。
+			log.Info("Cluster 已删除，SC 不可达，跳过 SC 节点清理", "error", err)
+			return r.removePageserverFinalizer(ctx, ps)
+		}
+		// SC 存在但暂时不可达：保留 finalizer，稍后重试。
+		// 这与旧代码不同——旧代码直接跳过清理移除 finalizer，
+		// 导致节点记录以 Active 状态残留在 SC 数据库中。
+		log.Info("无法连接 SC 进行准入检查，保留 finalizer 稍后重试", "error", err)
+		_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
+			utils.SetCondition(p, p.StatusConditions(), utils.ConditionDraining,
+				metav1.ConditionFalse, utils.ReasonDrainFailed,
+				fmt.Sprintf("SC 不可达，稍后重试: %v", err))
+		})
+		return ctrl.Result{RequeueAfter: drainPollInterval}, nil
 	}
 
 	var currentScheduling string
@@ -296,8 +314,19 @@ func (r *PageserverReconciler) monitorDrainProgress(ctx context.Context, ps *neo
 			log.Info("ConfigureNode(PauseForRestart) 失败，继续删除流程", "error", err)
 		}
 
-		// 可选：标记为 Deleting
-		_ = r.SCClient.StartNodeDelete(ctx, clusterName, ps.Namespace, nodeID, false)
+		// 标记为 Deleting：通过 PUT /node/{id}/delete?force=false 启动 SC 异步后台任务，
+		// SC 会迁移所有 shard 然后 set_tombstone（lifecycle='Deleted'）。
+		// 错误不静默忽略：SC 调用失败意味着节点未被 tombstone，
+		// 会导致 SC 数据库残留 active 节点记录。
+		if err := r.SCClient.StartNodeDelete(ctx, clusterName, ps.Namespace, nodeID, false); err != nil {
+			log.Error(err, "StartNodeDelete 失败，保留 finalizer 稍后重试", "nodeID", nodeID)
+			_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
+				utils.SetCondition(p, p.StatusConditions(), utils.ConditionDrainComplete,
+					metav1.ConditionFalse, utils.ReasonDrainFailed,
+					fmt.Sprintf("StartNodeDelete 失败: %v", err))
+			})
+			return ctrl.Result{RequeueAfter: drainPollInterval}, nil
+		}
 
 		_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
 			utils.SetCondition(p, p.StatusConditions(), utils.ConditionDrainComplete,

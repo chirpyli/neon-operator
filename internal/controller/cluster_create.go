@@ -271,12 +271,27 @@ func (r *ClusterReconciler) ensureComponentTokens(
 		safekeeper:   string(secret.Data["safekeeper_token"]),
 	}
 
-	// 如果所有 token 已存在，直接复用以保证 Deployment spec 稳定不变。
-	if tokens.pageserver != "" && tokens.controlPlane != "" && tokens.safekeeper != "" {
+	// 检查已有 token 是否过期，过期则需要重新签发。
+	// GenerateScopeToken 通过 SHA256(key+cluster+scope) 确定性计算 exp，
+	// 部分 hash 组合可能导致 exp 已经过去，必须检测并重新生成。
+	tokenExpired := func(tokenStr string) bool {
+		return tokenStr != "" && jm.IsTokenExpired(tokenStr)
+	}
+	anyExpired := tokenExpired(tokens.pageserver) || tokenExpired(tokens.controlPlane) || tokenExpired(tokens.safekeeper)
+
+	// 如果所有 token 已存在且未过期，直接复用以保证 Deployment spec 稳定不变。
+	if !anyExpired && tokens.pageserver != "" && tokens.controlPlane != "" && tokens.safekeeper != "" {
 		return tokens, nil
 	}
 
-	log.Info("正在生成新的组件 JWT token 并持久化到 Secret")
+	if anyExpired {
+		log.Info("检测到 JWT token 已过期，重新生成",
+			"pageserver_expired", tokenExpired(tokens.pageserver),
+			"controlPlane_expired", tokenExpired(tokens.controlPlane),
+			"safekeeper_expired", tokenExpired(tokens.safekeeper))
+	} else {
+		log.Info("正在生成新的组件 JWT token 并持久化到 Secret")
+	}
 
 	var err error
 	tokens.pageserver, err = jm.GenerateScopeToken(cluster.Name, utils.ScopePageServerAPI, utils.TokenDefaultLifetime)

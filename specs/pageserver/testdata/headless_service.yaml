@@ -22,6 +22,7 @@ spec:
     port: 9898
     protocol: TCP
     targetPort: 0
+  publishNotReadyAddresses: true
   selector:
     molnett.org/pageserver: test-pageserver
 status:
