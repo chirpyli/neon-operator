@@ -223,6 +223,10 @@ func EndpointConfigMap(
 		FormatVersion    string           `json:"format_version"`
 		Cluster          clusterConfig    `json:"cluster"`
 		ComputeCtlConfig computeCtlConfig `json:"compute_ctl_config"`
+		// StorageAuthToken 是 walproposer 连接 safekeeper 和 pageserver 时使用的认证 token。
+		// compute_ctl 从 spec 中读取此字段并设置为 NEON_AUTH_TOKEN 环境变量，
+		// walproposer 通过 libpagestore.c 硬编码读取该环境变量完成 JWT 认证。
+		StorageAuthToken string `json:"storage_auth_token,omitempty"`
 	}
 
 	// 聚合 roles：默认 postgres + 从 Role CR 聚合的用户角色
@@ -232,7 +236,8 @@ func EndpointConfigMap(
 	databases := aggregateDatabases(ctx, k8sClient, branch.Name)
 
 	spec := computeSpec{
-		FormatVersion: "1.0",
+		FormatVersion:    "1.0",
+		StorageAuthToken: safekeeperAuthToken,
 		Cluster: clusterConfig{
 			ClusterID: project.Spec.TenantID,
 			Name:      project.Name,

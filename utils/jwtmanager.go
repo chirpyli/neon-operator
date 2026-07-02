@@ -2,8 +2,10 @@ package utils
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
@@ -106,16 +108,41 @@ const (
 	ScopeTenant         = "tenant"
 )
 
-// GenerateScopeToken creates a long-lived JWT with the given scope.
+// GenerateScopeToken creates a long-lived, deterministic JWT with the given scope.
 // Used for component-to-component authentication (e.g. PS → SC upcall, PS → SK WAL).
+//
+// DETERMINISM: This function MUST produce the exact same output for the same
+// (clusterName, scope, secret) inputs across all invocations. If the token changes
+// between reconciles, it triggers a chain reaction:
+//
+//	ConfigMap.Data changes → checksum in Deployment annotation changes →
+//	Deployment Patch (RollingUpdate) → Owns-watch reconcile → repeat
+//
+// This cascade was observed producing 120+ Deployment revisions in minutes.
+//
+// Design decisions:
+//   - Neon's JWT validation (libs/utils/src/auth.rs) sets required_spec_claims = []
+//     and the Claims struct only has { tenant_id, scope, endpoint_id }. iat/iss/nbf
+//     are not required and are intentionally omitted.
+//   - exp is derived from SHA256(private_key + clusterName + scope) so it is
+//     fully deterministic per (key, cluster, scope) tuple. Using time.Now() or any
+//     real-time source would defeat determinism.
 func (jm *JWTManager) GenerateScopeToken(clusterName, scope string, expireIn time.Duration) (string, error) {
-	now := time.Now()
+	// Derive a stable "issued-at" time from the private key + cluster + scope.
+	// SHA256 produces a deterministic 32-byte hash; we use bytes for the base epoch
+	// offset to ensure token stability across all reconcile iterations.
+	h := sha256.Sum256(append(append(jm.privateKey.Seed(), []byte(clusterName)...), []byte(scope)...))
+	// Use first 4 bytes of hash modulo 3650 as day offset (0-3649 days ≈ 0-10 years).
+	// Without modulo, the uint32 hash could cause exp to be millions of years in the future.
+	dayOffset := int64(binary.BigEndian.Uint32(h[:4]) % 3650)
+	stableBase := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(dayOffset) * 24 * time.Hour)
+
 	claims := map[string]any{
-		"iss":   "neon-operator",
 		"sub":   clusterName,
 		"scope": scope,
-		"iat":   now.Unix(),
-		"exp":   now.Add(expireIn).Unix(),
+		"exp":   stableBase.Add(expireIn).Unix(),
+		// NOTE: Do NOT add "iat" or "iss". Including any time-varying or non-deterministic
+		// field would break ConfigMap stability and trigger cascading Deployment rolling restarts.
 	}
 	return jm.GenerateToken(claims)
 }

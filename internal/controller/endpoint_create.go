@@ -204,6 +204,50 @@ func (r *EndpointReconciler) reconcileEndpointDeployment(ctx context.Context, en
 			}
 		}
 
+		// 如果 Deployment 已 Available 但正处于滚动更新中（Progressing=NewReplicaSetCreated），
+		// 且仅 spec-checksum annotation 不同，则跳过本次更新。
+		// 这避免了 Role/Database 集中就绪期间，每个 reconcile 都触发新的滚动更新，
+		// 导致 Pod 被反复杀死重建（观察到的 11 个 ReplicaSet 级联现象）。
+		// 等当前滚动更新完成后，下次 reconcile 会自动应用最新的 checksum。
+		if utils.IsDeploymentAvailable(&currentDeployment) && utils.IsDeploymentRollingOut(&currentDeployment) {
+			intendedAnnotations := intendedDeployment.Spec.Template.ObjectMeta.Annotations
+			currentAnnotations := currentDeployment.Spec.Template.ObjectMeta.Annotations
+
+			var intendedChecksum, currentChecksum string
+			if intendedAnnotations != nil {
+				intendedChecksum = intendedAnnotations["neon.oltp.molnett.org/spec-checksum"]
+			}
+			if currentAnnotations != nil {
+				currentChecksum = currentAnnotations["neon.oltp.molnett.org/spec-checksum"]
+			}
+
+			// 将 intended 的 checksum 临时替换为 current 的，重新比较
+			if intendedAnnotations != nil {
+				if currentChecksum == "" {
+					delete(intendedAnnotations, "neon.oltp.molnett.org/spec-checksum")
+				} else {
+					intendedAnnotations["neon.oltp.molnett.org/spec-checksum"] = currentChecksum
+				}
+			}
+
+			onlyChecksumDiff := equality.Semantic.DeepDerivative(intendedDeployment.Spec, currentDeployment.Spec)
+
+			// 恢复 intended checksum
+			if intendedAnnotations != nil {
+				if intendedChecksum == "" {
+					delete(intendedAnnotations, "neon.oltp.molnett.org/spec-checksum")
+				} else {
+					intendedAnnotations["neon.oltp.molnett.org/spec-checksum"] = intendedChecksum
+				}
+			}
+
+			if onlyChecksumDiff {
+				log.Info("Skipping Deployment update: active rollout in progress, only checksum differs",
+					"name", endpoint.Name)
+				return nil
+			}
+		}
+
 		if err := r.Patch(ctx, intendedDeployment, client.Apply, &client.PatchOptions{
 			Force:        ptr.To(true),
 			FieldManager: utils.FieldManager,

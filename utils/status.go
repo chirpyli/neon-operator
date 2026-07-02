@@ -246,3 +246,20 @@ func IsDeploymentAvailable(dep *appsv1.Deployment) bool {
 	}
 	return false
 }
+
+// IsDeploymentRollingOut 判断 Deployment 是否正在执行滚动更新（已有新 ReplicaSet 正在创建）。
+// Available=True + Progressing=True(reason=NewReplicaSetCreated) 表示旧 Pod 仍在服务，
+// 新 ReplicaSet 正在启动但尚未接管流量。
+func IsDeploymentRollingOut(dep *appsv1.Deployment) bool {
+	if dep == nil {
+		return false
+	}
+	for _, c := range dep.Status.Conditions {
+		if c.Type == appsv1.DeploymentProgressing &&
+			c.Status == corev1.ConditionTrue &&
+			c.Reason == "NewReplicaSetCreated" {
+			return true
+		}
+	}
+	return false
+}

@@ -137,7 +137,13 @@ func notifyAttach(log *slog.Logger, k8sClient client.Client, computeBaseURL stri
 		// Generate compute spec using the deployment
 		for _, deployment := range deployments.Items {
 			if err := compute.RefreshConfiguration(ctx, log, k8sClient, actualRequest, &deployment, computeBaseURL); err != nil {
-				log.Error("Failed to refresh the configuration", "deployment", deployment.Name, "error", err)
+				// Best-effort: log the error but do NOT return a non-2xx status.
+				// compute_ctl may reject /configure with 412 if it's not yet in Empty|Running
+				// state (e.g. still starting up). Returning 500 would cause the storage
+				// controller to set pending_compute_notification=true and retry every 20s,
+				// creating an unnecessary retry storm. The compute will pick up the correct
+				// configuration on its next reconcile cycle or pod restart.
+				log.Warn("Failed to refresh configuration (non-fatal)", "deployment", deployment.Name, "error", err)
 				failcount = failcount + 1
 			} else {
 				log.Info("Successfully refreshed configuration", "deployment", deployment.Name)
@@ -145,11 +151,11 @@ func notifyAttach(log *slog.Logger, k8sClient client.Client, computeBaseURL stri
 		}
 
 		if failcount > 0 {
-			w.WriteHeader(http.StatusInternalServerError)
-			log.Error("Failed to refresh configuration for some deployments", "failed_count", failcount, "total_count", len(deployments.Items))
-			return
+			log.Warn("Some configurations could not be refreshed (will be picked up on next reconcile)",
+				"failed_count", failcount, "total_count", len(deployments.Items))
 		}
 
+		// Always return 200 to avoid triggering persistent retry loops in the storage controller.
 		w.WriteHeader(http.StatusOK)
 	})
 }

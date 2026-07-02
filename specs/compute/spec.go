@@ -151,6 +151,10 @@ type ComputeSpec struct {
 	SafekeepersGeneration    *uint32                  `json:"safekeepers_generation,omitempty"`
 	SafekeeperConnstrings    []string                 `json:"safekeeper_connstrings"`
 	PageserverConnectionInfo PageserverConnectionInfo `json:"pageserver_connection_info"`
+	// StorageAuthToken 是 walproposer 连接 safekeeper 和 pageserver 时使用的认证 token。
+	// 该值通过 NEON_AUTH_TOKEN 环境变量传入 compute 节点，作为 JWT 密码完成 safekeeper
+	// 的 JWT 认证。walproposer 源码 libpagestore.c 中硬编码读取此环境变量。
+	StorageAuthToken string `json:"storage_auth_token,omitempty"`
 }
 
 // ComputeSpecResponse represents the complete JSON response
@@ -213,10 +217,18 @@ func postComputeSpec(ctx context.Context,
 	}
 
 	now := time.Now()
+	// ComputeClaims 对应上游 neon/libs/compute_api/src/requests.rs 中的结构体：
+	//   compute_id: Option<String>
+	//   scope:      Option<ComputeClaimsScope>  // "compute_ctl:admin"
+	//   aud:        Option<Vec<String>>         // ["compute"]
+	//
+	// compute_ctl/authorize.rs 中的 verify() 使用 jsonwebtoken::decode<ComputeClaims>
+	// 将 JWT payload 反序列化。aud 必须为数组（serde_json 不会将 string 自动转为 Vec<String>），
+	// scope 必须为字符串值 "compute_ctl:admin"（对应 ComputeClaimsScope::Admin）。
 	claims := map[string]any{
 		"compute_id": computeId,
-		"aud":        "compute",
-		"roles":      []string{"compute_ctl:admin"},
+		"aud":        []string{"compute"},
+		"scope":      "compute_ctl:admin",
 		"exp":        now.Add(1 * time.Hour).Unix(),
 		"iat":        now.Unix(),
 		"iss":        "neon-operator",
@@ -228,7 +240,7 @@ func postComputeSpec(ctx context.Context,
 		return fmt.Errorf("failed to generate JWT token: %w", err)
 	}
 
-	adminServiceName := computeId + "-admin"
+	adminServiceName := fmt.Sprintf("endpoint-%s-admin", computeId)
 	adminServiceKey := client.ObjectKey{Name: adminServiceName, Namespace: deployment.Namespace}
 	adminService := &corev1.Service{}
 	if err := k8sClient.Get(ctx, adminServiceKey, adminService); err != nil {
@@ -446,6 +458,7 @@ func GenerateComputeSpec(
 					},
 					DeltaOperations:       []interface{}{},
 					SafekeeperConnstrings: safekeeperConnstrings,
+					StorageAuthToken:      safekeeperAuthToken,
 					PageserverConnectionInfo: PageserverConnectionInfo{
 						ShardCount: 0,
 						Shards:     map[string]PageserverShardInfo{},
@@ -508,6 +521,7 @@ func GenerateComputeSpec(
 			},
 			DeltaOperations:       []interface{}{},
 			SafekeeperConnstrings: safekeeperConnstrings,
+			StorageAuthToken:      safekeeperAuthToken,
 			PageserverConnectionInfo: PageserverConnectionInfo{
 				ShardCount: len(shards),
 				Shards:     shards,

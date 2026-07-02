@@ -60,6 +60,14 @@ func (r *SafekeeperReconciler) createSafekeeperResources(ctx context.Context, sk
 	regErr := r.SCClient.RegisterSafekeeper(ctx, sk)
 	if regErr != nil {
 		log.Info("向 Storage Controller 注册 safekeeper 失败，将在下次调和时重试", "error", regErr)
+	} else {
+		// 注册成功后立即激活。
+		// 首次创建时 safekeeper 处于 "Activating" 状态，
+		// 复用旧记录时可能保留之前的 "Decomissioned" 状态。
+		// 必须显式激活才能参与 tenant 调度。
+		if actErr := r.SCClient.ActivateSafekeeper(ctx, sk); actErr != nil {
+			log.Info("激活 safekeeper 失败，将在下次调和时重试", "error", actErr)
+		}
 	}
 	// 更新 RegisteredWithSC 状态，方便用户通过 kubectl 查看注册状态。
 	if patchErr := utils.PatchStatus(ctx, r.Client, sk, func(s *neonv1alpha1.Safekeeper) {

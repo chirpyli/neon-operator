@@ -22,30 +22,28 @@ import (
 	"oltp.molnett.org/neon-operator/utils"
 )
 
-// SCClient is a typed HTTP client for the Storage Controller's management API.
-// It handles JWT token generation and automatic redirect following (needed
-// for SC HA where non-leader nodes redirect to the leader).
+// SCClient 是 Storage Controller 管理 API 的类型化 HTTP 客户端。
+// 它处理 JWT token 生成和自动跟随重定向（SC HA 场景下非 leader 节点会重定向到 leader）。
 type SCClient struct {
 	k8sClient client.Client
-	// nonCachedReader bypasses the informer cache for cluster-scoped reads
-	// (e.g. Node object). This is critical because the cached client's Get
-	// blocks until the informer cache syncs — and if the controller lacks
-	// RBAC to watch Nodes, the Node cache never syncs, causing the entire
-	// reconcile loop to hang (MaxConcurrentReconciles=1 serializes all
-	// safekeeper reconciles behind the blocked worker).
+	// nonCachedReader 绕过 informer 缓存进行集群级别的读取
+	//（例如 Node 对象）。这一点很关键，因为缓存客户端的 Get
+	// 会阻塞直到 informer 缓存同步——如果 controller 没有
+	// RBAC 权限来 watch Node，Node 缓存永远不会同步，导致整个
+	// reconcile 循环被挂死（MaxConcurrentReconciles=1 将所有
+	// safekeeper reconcile 串行化在阻塞 worker 之后）。
 	nonCachedReader client.Reader
 	BaseURL         string
 	httpClient      *http.Client
-	// SkipAuth disables JWT authentication. Used in tests where the fake SC
-	// does not validate JWT tokens.
+	// SkipAuth 禁用 JWT 认证。用于测试场景（fake SC 不验证 JWT token）。
 	SkipAuth bool
 }
 
-// NewSCClient creates a new storage controller API client.
-// If baseURL is empty, the client will derive the URL from the cluster name
-// using the standard Kubernetes service naming convention.
-// nonCachedReader is used for cluster-scoped reads (Node) to avoid blocking
-// on informer cache sync when Node RBAC is unavailable.
+// NewSCClient 创建一个新的 storage controller API 客户端。
+// 如果 baseURL 为空，客户端将根据集群名称推导 URL，
+// 使用标准的 Kubernetes service 命名约定。
+// nonCachedReader 用于集群级别的读取（Node），避免在
+// Node RBAC 不可用时因 informer 缓存同步而阻塞。
 func NewSCClient(k8sClient client.Client, nonCachedReader client.Reader, baseURL string) *SCClient {
 	return &SCClient{
 		k8sClient:       k8sClient,
@@ -53,7 +51,7 @@ func NewSCClient(k8sClient client.Client, nonCachedReader client.Reader, baseURL
 		BaseURL:         baseURL,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
-			// Follow redirects (required for SC HA leader forwarding)
+			// 跟随重定向（SC HA leader 转发需要）
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				if len(via) >= 3 {
 					return fmt.Errorf("too many redirects")
@@ -64,7 +62,7 @@ func NewSCClient(k8sClient client.Client, nonCachedReader client.Reader, baseURL
 	}
 }
 
-// safekeeperUpsertRequest matches the SC's SafekeeperUpsert struct.
+// safekeeperUpsertRequest 对应 SC 的 SafekeeperUpsert 结构体。
 type safekeeperUpsertRequest struct {
 	ID                 int64  `json:"id"`
 	RegionID           string `json:"region_id"`
@@ -75,28 +73,28 @@ type safekeeperUpsertRequest struct {
 	AvailabilityZoneID string `json:"availability_zone_id"`
 }
 
-// schedulingPolicyRequest matches the SC's SafekeeperSchedulingPolicyRequest.
+// schedulingPolicyRequest 对应 SC 的 SafekeeperSchedulingPolicyRequest 结构体。
 type schedulingPolicyRequest struct {
 	SchedulingPolicy string `json:"scheduling_policy"`
 }
 
-// RegisterSafekeeper calls POST /control/v1/safekeeper/:id to upsert the
-// safekeeper's connection information in the Storage Controller.
+// RegisterSafekeeper 调用 POST /control/v1/safekeeper/:id
+// 在 Storage Controller 中 upsert safekeeper 的连接信息。
 //
-// The host is derived from the StatefulSet headless service DNS:
+// host 基于 StatefulSet headless service DNS 生成：
 //
 //	{cluster}-safekeeper-{id}.{cluster}-safekeeper-{id}-headless.{namespace}.svc.cluster.local
 //
-// This remains stable even when the pod is rescheduled to a different node.
+// 即使 pod 被重新调度到其他节点，该地址也保持稳定。
 //
-// Uses JWT with "admin" scope (SC master key) for authentication.
+// 使用 "admin" scope JWT（SC master key）进行认证。
 func (c *SCClient) RegisterSafekeeper(ctx context.Context, sk *neonv1alpha1.Safekeeper) error {
 	log := logf.FromContext(ctx)
 
 	baseURL := c.baseURL(sk.Spec.Cluster)
 	url := fmt.Sprintf("%s/control/v1/safekeeper/%d", baseURL, sk.Spec.ID)
 
-	// StatefulSet Pod FQDN (STS replica count = 1, ordinal = 0):
+	// StatefulSet Pod FQDN（STS 副本数 = 1，序号 = 0）：
 	// {pod-name}.{headless-service}.{namespace}.svc.cluster.local
 	host := fmt.Sprintf("%s-0.%s.%s.svc.cluster.local",
 		safekeeper.Name(sk),
@@ -104,7 +102,7 @@ func (c *SCClient) RegisterSafekeeper(ctx context.Context, sk *neonv1alpha1.Safe
 		sk.Namespace,
 	)
 
-	// Read availability zone from the node the pod is scheduled on
+	// 从 pod 调度到的节点读取可用区信息
 	az := c.getNodeAvailabilityZone(ctx, sk)
 
 	body := safekeeperUpsertRequest{
@@ -123,15 +121,15 @@ func (c *SCClient) RegisterSafekeeper(ctx context.Context, sk *neonv1alpha1.Safe
 	return c.doRequest(ctx, sk.Namespace, sk.Spec.Cluster, http.MethodPost, url, body)
 }
 
-// DecommissionSafekeeper calls POST /control/v1/safekeeper/:id/scheduling_policy
-// to set the safekeeper's scheduling policy to Decomissioned.
+// DecommissionSafekeeper 调用 POST /control/v1/safekeeper/:id/scheduling_policy
+// 将 safekeeper 的调度策略设置为 Decomissioned。
 //
-// Uses JWT with "admin" scope (SC master key) for authentication.
+// 使用 "admin" scope JWT（SC master key）进行认证。
 //
-// SC handles:
-//  1. Stop the per-safekeeper reconciler
-//  2. Stop assigning new timelines to this safekeeper
-//  3. Heartbeater skips Decomissioned nodes
+// SC 会执行以下操作：
+//  1. 停止该 safekeeper 对应的 reconciler
+//  2. 停止向该 safekeeper 分配新的 timeline
+//  3. Heartbeater 跳过 Decomissioned 节点
 func (c *SCClient) DecommissionSafekeeper(ctx context.Context, sk *neonv1alpha1.Safekeeper) error {
 	log := logf.FromContext(ctx)
 
@@ -148,7 +146,31 @@ func (c *SCClient) DecommissionSafekeeper(ctx context.Context, sk *neonv1alpha1.
 	return c.doRequest(ctx, sk.Namespace, sk.Spec.Cluster, http.MethodPost, url, body)
 }
 
-// baseURL returns the storage controller base URL.
+// ActivateSafekeeper 调用 POST /control/v1/safekeeper/:id/scheduling_policy
+// 将 safekeeper 的调度策略设置为 Active。
+//
+// RegisterSafekeeper 之后，新记录的 safekeeper 处于 "Activating" 状态，
+// 而已有记录可能保留之前的 scheduling_policy（例如上次运行的 "Decomissioned" 状态）。
+// 必须调用此方法显式激活，safekeeper 才能参与 tenant 调度。
+//
+// 使用 "admin" scope JWT（SC master key）进行认证。
+func (c *SCClient) ActivateSafekeeper(ctx context.Context, sk *neonv1alpha1.Safekeeper) error {
+	log := logf.FromContext(ctx)
+
+	baseURL := c.baseURL(sk.Spec.Cluster)
+	url := fmt.Sprintf("%s/control/v1/safekeeper/%d/scheduling_policy", baseURL, sk.Spec.ID)
+
+	body := schedulingPolicyRequest{
+		SchedulingPolicy: "Active",
+	}
+
+	log.Info("Activating safekeeper in storage controller",
+		"url", url, "id", sk.Spec.ID)
+
+	return c.doRequest(ctx, sk.Namespace, sk.Spec.Cluster, http.MethodPost, url, body)
+}
+
+// baseURL 返回 storage controller 的基础 URL。
 func (c *SCClient) baseURL(clusterName string) string {
 	if c.BaseURL != "" {
 		return c.BaseURL
@@ -156,8 +178,8 @@ func (c *SCClient) baseURL(clusterName string) string {
 	return storagecontroller.URL(clusterName)
 }
 
-// doRequest sends an authenticated HTTP request to the storage controller.
-// It generates a JWT token with the appropriate scope and adds it as a Bearer token.
+// doRequest 向 storage controller 发送带认证的 HTTP 请求。
+// 生成具有适当 scope 的 JWT token 并添加为 Bearer token。
 func (c *SCClient) doRequest(ctx context.Context, namespace, clusterName, method, url string, body any) error {
 	log := logf.FromContext(ctx)
 
@@ -172,7 +194,7 @@ func (c *SCClient) doRequest(ctx context.Context, namespace, clusterName, method
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Add JWT authentication (skipped in tests where fake SC doesn't validate)
+	// 添加 JWT 认证（测试环境中 fake SC 不验证，跳过）
 	if !c.SkipAuth {
 		token, err := c.adminJWT(ctx, clusterName, namespace)
 		if err != nil {
@@ -199,20 +221,20 @@ func (c *SCClient) doRequest(ctx context.Context, namespace, clusterName, method
 	return fmt.Errorf("storage controller returned %d: %s", resp.StatusCode, string(respBody))
 }
 
-// generateJWT creates a signed JWT token for authenticating with the storage controller.
-// It reads the cluster's Ed25519 private key from the JWT secret (in the cluster namespace)
-// and signs a token with the given scope.
+// generateJWT 创建用于与 storage controller 认证的已签名 JWT token。
+// 从 JWT secret（位于集群命名空间内）读取集群的 Ed25519 私钥，
+// 并使用指定的 scope 签名 token。
 //
-// The scope must be a valid upstream Scope enum value (lowercase, e.g. "admin", "infra",
-// "generations_api"). See libs/utils/src/auth.rs in the upstream neon repo.
+// scope 必须是有效的上游 Scope 枚举值（小写，例如 "admin"、"infra"、
+// "generations_api"）。参见上游 neon 仓库中的 libs/utils/src/auth.rs。
 //
-// The SC implements an "Admin master key" mechanism: if a request's scope doesn't match
-// the required scope for an endpoint, SC falls back to checking whether the scope is
-// Admin — and if so, allows the request. This means "admin" scope can access all SC
-// endpoints, which we use as a simple unified approach for the operator.
+// SC 实现了 "Admin master key" 机制：如果请求的 scope 与端点要求的 scope
+// 不匹配，SC 会回退检查该 scope 是否是 Admin — 如果是，则允许请求。
+// 这意味着 "admin" scope 可以访问所有 SC 端点，
+// 我们将其作为 operator 的统一认证方案。
 //
-// Delegates to utils.JWTManager for key loading and signing, keeping the
-// single Ed25519 signing implementation shared with compute token generation.
+// 委托 utils.JWTManager 进行 key 加载和签名，
+// 保持 Ed25519 签名实现与 compute token 生成共享同一实现。
 func (c *SCClient) generateJWT(ctx context.Context, clusterName, namespace, scope string) (string, error) {
 	secretName := utils.JWTSecretName(clusterName)
 
@@ -241,29 +263,29 @@ func (c *SCClient) generateJWT(ctx context.Context, clusterName, namespace, scop
 	return jm.GenerateToken(claims)
 }
 
-// adminJWT generates a JWT with "admin" scope, which is the SC master key
-// that can access all SC management endpoints.
+// adminJWT 生成 "admin" scope 的 JWT，即 SC master key，
+// 可以访问所有 SC 管理端点。
 func (c *SCClient) adminJWT(ctx context.Context, clusterName, namespace string) (string, error) {
 	return c.generateJWT(ctx, clusterName, namespace, "admin")
 }
 
-// SafekeeperHTTPToken generates a JWT token for authenticating with the
-// safekeeper HTTP management API (port 7676). The safekeeper validates
-// tokens using the same Ed25519 public key as the storage controller
-// (configured via --http-auth-public-key-path).
+// SafekeeperHTTPToken 生成用于访问 safekeeper HTTP 管理 API（端口 7676）的 JWT token。
+// safekeeper 使用与 storage controller 相同的 Ed25519 公钥验证 token
+// （通过 --http-auth-public-key-path 配置）。
 //
-// Uses "admin" scope which is accepted by all safekeeper HTTP endpoints
-// through the same master key mechanism.
+// 使用 "safekeeperdata" scope，这是 safekeeper auth.rs 要求的。
+// safekeeper 只接受 Tenant 和 SafekeeperData scope；
+// Admin、PageServerApi 等 scope 会被显式拒绝。
 func (c *SCClient) SafekeeperHTTPToken(ctx context.Context, clusterName, namespace string) (string, error) {
-	return c.adminJWT(ctx, clusterName, namespace)
+	return c.generateJWT(ctx, clusterName, namespace, "safekeeperdata")
 }
 
 // =============================================================================
-// Pageserver Node Management APIs
+// Pageserver 节点管理 API
 // =============================================================================
 
-// NodeDescribeResponse mirrors SC's NodeDescribeResponse for the
-// GET /control/v1/node and GET /control/v1/node/:id endpoints.
+// NodeDescribeResponse 对应 SC 的 NodeDescribeResponse，
+// 用于 GET /control/v1/node 和 GET /control/v1/node/:id 端点。
 type NodeDescribeResponse struct {
 	ID               uint64 `json:"id"`
 	Availability     string `json:"availability"`
@@ -276,31 +298,31 @@ type NodeDescribeResponse struct {
 	AvailabilityZone string `json:"availability_zone_id"`
 }
 
-// NodeListResponse mirrors SC's response for GET /control/v1/node.
+// NodeListResponse 对应 SC 的 GET /control/v1/node 响应。
 type NodeListResponse struct {
 	Nodes []NodeDescribeResponse `json:"nodes"`
 }
 
-// ShardDescribeResponse mirrors SC's shard info for
-// GET /control/v1/node/:id/shards.
+// ShardDescribeResponse 对应 SC 的 shard 信息，
+// 用于 GET /control/v1/node/:id/shards 端点。
 type ShardDescribeResponse struct {
 	TenantShardID string `json:"tenant_shard_id"`
 	Attached      bool   `json:"attached"`
 	Secondary     bool   `json:"secondary"`
 }
 
-// NodeShardsResponse mirrors SC's response for GET /control/v1/node/:id/shards.
+// NodeShardsResponse 对应 SC 的 GET /control/v1/node/:id/shards 响应。
 type NodeShardsResponse struct {
 	Shards []ShardDescribeResponse `json:"shards"`
 }
 
-// nodeConfigRequest is the request body for PUT /control/v1/node/:id/config.
+// nodeConfigRequest 是 PUT /control/v1/node/:id/config 的请求体。
 type nodeConfigRequest struct {
 	Availability *string `json:"availability,omitempty"`
 	Scheduling   *string `json:"scheduling,omitempty"`
 }
 
-// GetNode calls GET /control/v1/node/:node_id to get a single node's status.
+// GetNode 调用 GET /control/v1/node/:node_id 获取单个节点状态。
 func (c *SCClient) GetNode(ctx context.Context, clusterName, namespace string, nodeID uint64) (*NodeDescribeResponse, error) {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/control/v1/node/%d", baseURL, nodeID)
@@ -317,7 +339,7 @@ func (c *SCClient) GetNode(ctx context.Context, clusterName, namespace string, n
 	return &node, nil
 }
 
-// ListNodeNodes calls GET /control/v1/node to list all nodes.
+// ListNodeNodes 调用 GET /control/v1/node 列出所有节点。
 func (c *SCClient) ListNodeNodes(ctx context.Context, clusterName, namespace string) ([]NodeDescribeResponse, error) {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/control/v1/node", baseURL)
@@ -334,7 +356,7 @@ func (c *SCClient) ListNodeNodes(ctx context.Context, clusterName, namespace str
 	return result.Nodes, nil
 }
 
-// GetNodeShards calls GET /control/v1/node/:node_id/shards to list shards on a node.
+// GetNodeShards 调用 GET /control/v1/node/:node_id/shards 列出节点上的 shard。
 func (c *SCClient) GetNodeShards(ctx context.Context, clusterName, namespace string, nodeID uint64) ([]ShardDescribeResponse, error) {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/control/v1/node/%d/shards", baseURL, nodeID)
@@ -351,8 +373,8 @@ func (c *SCClient) GetNodeShards(ctx context.Context, clusterName, namespace str
 	return result.Shards, nil
 }
 
-// ConfigureNode calls PUT /control/v1/node/:node_id/config to change availability
-// and/or scheduling policy. Pass nil for fields that should not be changed.
+// ConfigureNode 调用 PUT /control/v1/node/:node_id/config 修改
+// 节点的 availability 和/或 scheduling policy。不需要修改的字段传 nil。
 func (c *SCClient) ConfigureNode(ctx context.Context, clusterName, namespace string, nodeID uint64, availability, scheduling *string) error {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/control/v1/node/%d/config", baseURL, nodeID)
@@ -365,8 +387,8 @@ func (c *SCClient) ConfigureNode(ctx context.Context, clusterName, namespace str
 	return c.doRequest(ctx, namespace, clusterName, http.MethodPut, url, body)
 }
 
-// StartNodeDrain calls PUT /control/v1/node/:node_id/drain to start draining
-// a node (migrate its attached shards to other nodes).
+// StartNodeDrain 调用 PUT /control/v1/node/:node_id/drain 开始排空节点
+// （将其上的 attached shard 迁移到其他节点）。
 func (c *SCClient) StartNodeDrain(ctx context.Context, clusterName, namespace string, nodeID uint64) error {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/control/v1/node/%d/drain", baseURL, nodeID)
@@ -374,8 +396,8 @@ func (c *SCClient) StartNodeDrain(ctx context.Context, clusterName, namespace st
 	return c.doRequest(ctx, namespace, clusterName, http.MethodPut, url, nil)
 }
 
-// CancelNodeDrain calls DELETE /control/v1/node/:node_id/drain to cancel
-// an ongoing drain operation.
+// CancelNodeDrain 调用 DELETE /control/v1/node/:node_id/drain
+// 取消正在进行的排空操作。
 func (c *SCClient) CancelNodeDrain(ctx context.Context, clusterName, namespace string, nodeID uint64) error {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/control/v1/node/%d/drain", baseURL, nodeID)
@@ -383,8 +405,8 @@ func (c *SCClient) CancelNodeDrain(ctx context.Context, clusterName, namespace s
 	return c.doRequest(ctx, namespace, clusterName, http.MethodDelete, url, nil)
 }
 
-// StartNodeFill calls PUT /control/v1/node/:node_id/fill to set a node to
-// Filling mode (only receives new shard placements, not existing shards).
+// StartNodeFill 调用 PUT /control/v1/node/:node_id/fill
+// 将节点设置为 Filling 模式（仅接收新 shard 分配，不接收已有 shard）。
 func (c *SCClient) StartNodeFill(ctx context.Context, clusterName, namespace string, nodeID uint64) error {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/control/v1/node/%d/fill", baseURL, nodeID)
@@ -392,8 +414,8 @@ func (c *SCClient) StartNodeFill(ctx context.Context, clusterName, namespace str
 	return c.doRequest(ctx, namespace, clusterName, http.MethodPut, url, nil)
 }
 
-// CancelNodeFill calls DELETE /control/v1/node/:node_id/fill to cancel
-// Filling mode and return to Active.
+// CancelNodeFill 调用 DELETE /control/v1/node/:node_id/fill
+// 取消 Filling 模式并恢复为 Active。
 func (c *SCClient) CancelNodeFill(ctx context.Context, clusterName, namespace string, nodeID uint64) error {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/control/v1/node/%d/fill", baseURL, nodeID)
@@ -401,8 +423,8 @@ func (c *SCClient) CancelNodeFill(ctx context.Context, clusterName, namespace st
 	return c.doRequest(ctx, namespace, clusterName, http.MethodDelete, url, nil)
 }
 
-// StartNodeDelete calls PUT /control/v1/node/:node_id/delete to mark a node
-// for deletion. If force is true, the node will be deleted without drain.
+// StartNodeDelete 调用 PUT /control/v1/node/:node_id/delete 标记节点为删除。
+// 如果 force 为 true，节点将被跳过排空直接删除。
 func (c *SCClient) StartNodeDelete(ctx context.Context, clusterName, namespace string, nodeID uint64, force bool) error {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/control/v1/node/%d/delete?force=%t", baseURL, nodeID, force)
@@ -410,8 +432,8 @@ func (c *SCClient) StartNodeDelete(ctx context.Context, clusterName, namespace s
 	return c.doRequest(ctx, namespace, clusterName, http.MethodPut, url, nil)
 }
 
-// CancelNodeDelete calls DELETE /control/v1/node/:node_id/delete to cancel
-// an ongoing node deletion.
+// CancelNodeDelete 调用 DELETE /control/v1/node/:node_id/delete
+// 取消正在进行的节点删除操作。
 func (c *SCClient) CancelNodeDelete(ctx context.Context, clusterName, namespace string, nodeID uint64) error {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/control/v1/node/%d/delete", baseURL, nodeID)
@@ -419,7 +441,7 @@ func (c *SCClient) CancelNodeDelete(ctx context.Context, clusterName, namespace 
 	return c.doRequest(ctx, namespace, clusterName, http.MethodDelete, url, nil)
 }
 
-// doRequestGet sends an authenticated GET request and returns the response body.
+// doRequestGet 发送一个带认证的 GET 请求，返回响应体。
 func (c *SCClient) doRequestGet(ctx context.Context, namespace, clusterName, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -453,17 +475,16 @@ func (c *SCClient) doRequestGet(ctx context.Context, namespace, clusterName, url
 	return nil, fmt.Errorf("storage controller returned %d: %s", resp.StatusCode, string(respBody))
 }
 
-// DeleteTenant calls DELETE /v1/tenant/:tenant_id to delete a tenant from the
-// storage controller. Returns nil on 200, 404 (already deleted), or 409
-// (unrecoverable conflict, e.g. no pageserver found — tenant was never
-// properly scheduled, so there is nothing to clean up).
+// DeleteTenant 调用 DELETE /v1/tenant/:tenant_id 从 storage controller 删除 tenant。
+// 在 200、404（已删除）或 409（不可恢复冲突，例如找不到 pageserver — tenant
+// 从未被正确调度，无数据需要清理）时返回 nil。
 func (c *SCClient) DeleteTenant(ctx context.Context, clusterName, namespace, tenantID string) error {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/v1/tenant/%s", baseURL, tenantID)
 
 	err := c.doRequest(ctx, namespace, clusterName, http.MethodDelete, url, nil)
 	if err != nil && (isSCNotFound(err) || isSCConflict(err)) {
-		return nil // 404/409 = idempotent success
+		return nil // 404/409 = 幂等成功
 	}
 	return err
 }
@@ -476,13 +497,13 @@ func (c *SCClient) DeleteTimeline(ctx context.Context, clusterName, namespace, t
 
 	err := c.doRequest(ctx, namespace, clusterName, http.MethodDelete, url, nil)
 	if err != nil && isSCNotFound(err) {
-		return nil // 404 = already deleted, idempotent success
+		return nil // 404 = 已删除，幂等成功
 	}
 	return err
 }
 
-// CreateTenant calls PUT /v1/tenant/:tenant_id/location_config to create or
-// configure a tenant on the storage controller.
+// CreateTenant 调用 PUT /v1/tenant/:tenant_id/location_config
+// 在 storage controller 上创建或配置 tenant。
 func (c *SCClient) CreateTenant(ctx context.Context, clusterName, namespace, tenantID string, mode string, generation int) error {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/v1/tenant/%s/location_config", baseURL, tenantID)
@@ -507,7 +528,7 @@ func (c *SCClient) CreateTimeline(ctx context.Context, clusterName, namespace, t
 	}
 	err := c.doRequest(ctx, namespace, clusterName, http.MethodPost, url, body)
 	if err != nil && isSCConflict(err) {
-		return nil // 409 = timeline already exists, idempotent success
+		return nil // 409 = timeline 已存在，幂等成功
 	}
 	return err
 }
@@ -531,23 +552,23 @@ func (c *SCClient) GetTenantInfo(ctx context.Context, clusterName, namespace, te
 	return &info, nil
 }
 
-// isSCNotFound checks whether the error message indicates a 404 from the SC.
+// isSCNotFound 检查错误消息是否表示 SC 返回了 404。
 func isSCNotFound(err error) bool {
 	return strings.Contains(err.Error(), "returned 404")
 }
 
-// isSCConflict checks whether the error message indicates a 409 from the SC.
+// isSCConflict 检查错误消息是否表示 SC 返回了 409。
 func isSCConflict(err error) bool {
 	return strings.Contains(err.Error(), "returned 409")
 }
 
-// getNodeAvailabilityZone reads the K8s node topology label to determine
-// the availability zone for the safekeeper's pod.
+// getNodeAvailabilityZone 读取 K8s 节点的 topology label，
+// 确定 safekeeper pod 所在的可用区。
 //
-// IMPORTANT: Node reads must use nonCachedReader (uncached API reader) because
-// the operator's RBAC may not include "nodes" list/watch — which prevents the
-// Node informer cache from syncing. If we use the cached client, the Get call
-// blocks indefinitely, stalling the entire safekeeper reconcile loop.
+// 重点：Node 读取必须使用 nonCachedReader（非缓存的 API reader），
+// 因为 operator 的 RBAC 可能不包含对 nodes 的 list/watch 权限，
+// 这会导致 Node informer 缓存永远无法同步。如果使用缓存客户端，
+// Get 调用将无限期阻塞，导致整个 safekeeper reconcile 循环卡死。
 func (c *SCClient) getNodeAvailabilityZone(ctx context.Context, sk *neonv1alpha1.Safekeeper) string {
 	log := logf.FromContext(ctx)
 	pod := &corev1.Pod{}
@@ -568,8 +589,8 @@ func (c *SCClient) getNodeAvailabilityZone(ctx context.Context, sk *neonv1alpha1
 		return "unknown"
 	}
 
-	// Use nonCachedReader for Node to avoid blocking on informer cache sync.
-	// Falls back to cached client if nonCachedReader is nil (e.g. in tests).
+	// 使用 nonCachedReader 读取 Node，避免因 informer 缓存同步而阻塞。
+	// 如果 nonCachedReader 为 nil（例如测试环境），回退到缓存客户端。
 	node := &corev1.Node{}
 	reader := c.nonCachedReader
 	if reader == nil {

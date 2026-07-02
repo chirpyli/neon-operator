@@ -263,7 +263,7 @@ func (r *ClusterReconciler) ensureComponentTokens(
 		safekeeper:   string(secret.Data["safekeeper_token"]),
 	}
 
-	// If all tokens exist, reuse them to keep the Deployment spec stable.
+	// 如果所有 token 已存在，直接复用以保证 Deployment spec 稳定不变。
 	if tokens.pageserver != "" && tokens.controlPlane != "" && tokens.safekeeper != "" {
 		return tokens, nil
 	}
@@ -279,7 +279,7 @@ func (r *ClusterReconciler) ensureComponentTokens(
 	if err != nil {
 		return nil, fmt.Errorf("generate control plane token: %w", err)
 	}
-	tokens.safekeeper, err = jm.GenerateScopeToken(cluster.Name, utils.ScopeAdmin, utils.TokenDefaultLifetime)
+	tokens.safekeeper, err = jm.GenerateScopeToken(cluster.Name, utils.ScopeSafekeeperData, utils.TokenDefaultLifetime)
 	if err != nil {
 		return nil, fmt.Errorf("generate safekeeper token: %w", err)
 	}
