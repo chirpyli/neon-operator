@@ -2,21 +2,40 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   creationTimestamp: null
+  labels:
+    app.kubernetes.io/component: storage-broker
+    app.kubernetes.io/name: storage-broker
+    app.kubernetes.io/part-of: neon
+    molnett.org/cluster: test-cluster
   name: test-cluster-storage-broker
   namespace: neon
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: test-cluster-storage-broker
+      app.kubernetes.io/component: storage-broker
+      molnett.org/cluster: test-cluster
   strategy:
     type: RollingUpdate
   template:
     metadata:
       creationTimestamp: null
       labels:
-        app.kubernetes.io/name: test-cluster-storage-broker
+        app.kubernetes.io/component: storage-broker
+        app.kubernetes.io/name: storage-broker
+        app.kubernetes.io/part-of: neon
+        molnett.org/cluster: test-cluster
     spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - podAffinityTerm:
+              labelSelector:
+                matchLabels:
+                  app.kubernetes.io/component: storage-broker
+                  molnett.org/cluster: test-cluster
+              topologyKey: kubernetes.io/hostname
+            weight: 100
       containers:
       - args:
         - --listen-addr
@@ -47,7 +66,13 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 5
           timeoutSeconds: 3
-        resources: {}
+        resources:
+          limits:
+            cpu: 500m
+            memory: 256Mi
+          requests:
+            cpu: 100m
+            memory: 128Mi
         startupProbe:
           failureThreshold: 6
           httpGet:
@@ -57,4 +82,9 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 5
           timeoutSeconds: 5
+      securityContext:
+        fsGroup: 1000
+        runAsGroup: 1000
+        runAsUser: 1000
+      terminationGracePeriodSeconds: 30
 status: {}

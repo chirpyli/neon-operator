@@ -16,6 +16,7 @@ func TestSpecs(t *testing.T) {
 		obj  any
 	}{
 		{"deployment", storagebroker.Deployment(cluster)},
+		{"pdb", storagebroker.PodDisruptionBudget(cluster.Name, cluster.Namespace)},
 		{"service", storagebroker.Service(cluster)},
 	}
 	for _, tc := range cases {

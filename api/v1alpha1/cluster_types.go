@@ -132,6 +132,18 @@ type ClusterSpec struct {
 	// configuration for the Storage Broker Deployment.
 	// +optional
 	StorageBrokerProbes *ClusterComponentProbes `json:"storageBrokerProbes,omitempty"`
+
+	// StorageControllerResources 覆盖 Storage Controller 容器的默认资源配置。
+	// 未设置时使用 operator 内置默认值
+	// (CPU: 250m/1, Memory: 256Mi/512Mi)。
+	// +optional
+	StorageControllerResources *corev1.ResourceRequirements `json:"storageControllerResources,omitempty"`
+
+	// StorageBrokerResources 覆盖 Storage Broker 容器的默认资源配置。
+	// 未设置时使用 operator 内置默认值
+	// (CPU: 100m/500m, Memory: 128Mi/256Mi)。
+	// +optional
+	StorageBrokerResources *corev1.ResourceRequirements `json:"storageBrokerResources,omitempty"`
 }
 
 // ClusterComponentProbes groups probe configurations for a cluster-scoped

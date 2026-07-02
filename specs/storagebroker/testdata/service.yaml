@@ -10,6 +10,7 @@ spec:
     port: 50051
     targetPort: 50051
   selector:
-    app.kubernetes.io/name: test-cluster-storage-broker
+    app.kubernetes.io/component: storage-broker
+    molnett.org/cluster: test-cluster
 status:
   loadBalancer: {}

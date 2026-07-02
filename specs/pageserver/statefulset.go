@@ -17,8 +17,8 @@ const storageVolumeName = "pageserver-storage"
 
 const initScript = `echo "id=%d" > /config/identity.toml
 
-echo "{\"host\":\"%s.%s\"," \
-     "\"http_host\":\"%s.%s\"," \
+echo "{\"host\":\"%s-0.%s.%s.svc.cluster.local\"," \
+     "\"http_host\":\"%s-0.%s.%s.svc.cluster.local\"," \
      "\"http_port\":9898,\"port\":6400," \
      "\"availability_zone_id\":\"%s\"}" > /config/metadata.json
 
@@ -146,8 +146,8 @@ func podSpec(ps *v1alpha1.Pageserver, image, serviceName, safekeeperAuthToken st
 				Args: []string{
 					fmt.Sprintf(initScript,
 						ps.Spec.ID,
-						serviceName, ps.Namespace,
-						serviceName, ps.Namespace,
+						serviceName, HeadlessName(ps), ps.Namespace,
+						serviceName, HeadlessName(ps), ps.Namespace,
 						availabilityZone(ps)),
 				},
 				VolumeMounts: []corev1.VolumeMount{

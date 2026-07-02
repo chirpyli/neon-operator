@@ -1,0 +1,22 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  creationTimestamp: null
+  labels:
+    app.kubernetes.io/component: storage-broker
+    app.kubernetes.io/name: storage-broker
+    app.kubernetes.io/part-of: neon
+    molnett.org/cluster: test-cluster
+  name: test-cluster-storage-broker
+  namespace: neon
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: storage-broker
+      molnett.org/cluster: test-cluster
+status:
+  currentHealthy: 0
+  desiredHealthy: 0
+  disruptionsAllowed: 0
+  expectedPods: 0

@@ -11,6 +11,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -237,6 +238,13 @@ func (r *ClusterReconciler) reconcileStorageController(ctx context.Context, clus
 		return err
 	}
 
+	pdb := storagecontroller.PodDisruptionBudget(cluster.Name, cluster.Namespace)
+	if err := utils.ReconcileSSA(ctx, r.Client, r.Scheme, cluster, pdb, func(cur *policyv1.PodDisruptionBudget) bool {
+		return !equality.Semantic.DeepDerivative(pdb.Spec, cur.Spec)
+	}); err != nil {
+		return err
+	}
+
 	svc := storagecontroller.Service(cluster)
 	return utils.ReconcileSSA(ctx, r.Client, r.Scheme, cluster, svc, func(cur *corev1.Service) bool {
 		return !equality.Semantic.DeepDerivative(svc.Spec, cur.Spec)
@@ -303,6 +311,13 @@ func (r *ClusterReconciler) reconcileStorageBroker(ctx context.Context, cluster 
 	dep := storagebroker.Deployment(cluster)
 	if err := utils.ReconcileSSA(ctx, r.Client, r.Scheme, cluster, dep, func(cur *appsv1.Deployment) bool {
 		return !equality.Semantic.DeepDerivative(dep.Spec, cur.Spec)
+	}); err != nil {
+		return err
+	}
+
+	pdb := storagebroker.PodDisruptionBudget(cluster.Name, cluster.Namespace)
+	if err := utils.ReconcileSSA(ctx, r.Client, r.Scheme, cluster, pdb, func(cur *policyv1.PodDisruptionBudget) bool {
+		return !equality.Semantic.DeepDerivative(pdb.Spec, cur.Spec)
 	}); err != nil {
 		return err
 	}

@@ -10,6 +10,7 @@ spec:
     port: 8080
     targetPort: 8080
   selector:
-    app.kubernetes.io/name: test-cluster-storage-controller
+    app.kubernetes.io/component: storage-controller
+    molnett.org/cluster: test-cluster
 status:
   loadBalancer: {}

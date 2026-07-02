@@ -124,8 +124,8 @@ spec:
         - |
           echo "id=0" > /config/identity.toml
 
-          echo "{\"host\":\"test-cluster-pageserver-0.neon\"," \
-               "\"http_host\":\"test-cluster-pageserver-0.neon\"," \
+          echo "{\"host\":\"test-cluster-pageserver-0-0.test-cluster-pageserver-0-headless.neon.svc.cluster.local\"," \
+               "\"http_host\":\"test-cluster-pageserver-0-0.test-cluster-pageserver-0-headless.neon.svc.cluster.local\"," \
                "\"http_port\":9898,\"port\":6400," \
                "\"availability_zone_id\":\"se-ume\"}" > /config/metadata.json
 

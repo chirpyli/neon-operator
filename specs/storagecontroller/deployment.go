@@ -12,8 +12,11 @@ import (
 	"oltp.molnett.org/neon-operator/utils"
 )
 
+const defaultSCName = "storage-controller"
+
 func Deployment(cluster *v1alpha1.Cluster, publicKeyPEM, pageserverToken, controlPlaneToken, safekeeperToken string) *appsv1.Deployment {
-	storageControllerName := Name(cluster.Name)
+	scName := Name(cluster.Name)
+	lbls := labels(cluster.Name)
 
 	probes := cluster.Spec.StorageControllerProbes
 	var startupCfg, livenessCfg, readinessCfg *v1alpha1.ProbeConfig
@@ -29,8 +32,9 @@ func Deployment(cluster *v1alpha1.Cluster, publicKeyPEM, pageserverToken, contro
 			Kind:       "Deployment",
 		},
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      storageControllerName,
+			Name:      scName,
 			Namespace: cluster.Namespace,
+			Labels:    lbls,
 		},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptr.To(int32(1)),
@@ -38,23 +42,43 @@ func Deployment(cluster *v1alpha1.Cluster, publicKeyPEM, pageserverToken, contro
 				Type: appsv1.RollingUpdateDeploymentStrategyType,
 			},
 			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"app.kubernetes.io/name": storageControllerName,
-				},
+				MatchLabels: LabelSelector(cluster.Name),
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app.kubernetes.io/name": storageControllerName,
-					},
+					Labels: lbls,
 				},
 				Spec: corev1.PodSpec{
+					// SecurityContext 确保容器以非 root 用户运行。
+					SecurityContext: &corev1.PodSecurityContext{
+						RunAsUser:  ptr.To(int64(1000)),
+						RunAsGroup: ptr.To(int64(1000)),
+						FSGroup:    ptr.To(int64(1000)),
+					},
+					// TerminationGracePeriodSeconds 给 leader 足够时间优雅退出，
+					// 允许正常移交后再被强制终止。
+					TerminationGracePeriodSeconds: ptr.To(int64(60)),
+					// PodAntiAffinity 确保 SC Pod（leader + 滚动更新候选）
+					// 分散在不同节点上。硬反亲和可防止单节点故障
+					// 同时影响 leader 和替补 Pod。
+					Affinity: &corev1.Affinity{
+						PodAntiAffinity: &corev1.PodAntiAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{
+								{
+									LabelSelector: &metav1.LabelSelector{
+										MatchLabels: LabelSelector(cluster.Name),
+									},
+									TopologyKey: "kubernetes.io/hostname",
+								},
+							},
+						},
+					},
 					Volumes: []corev1.Volume{
 						utils.JWTVolume(cluster.Name),
 					},
 					Containers: []corev1.Container{
 						{
-							Name:            "storage-controller",
+							Name:            defaultSCName,
 							Image:           cluster.Spec.NeonImage,
 							ImagePullPolicy: corev1.PullIfNotPresent,
 							Command: []string{
@@ -106,6 +130,7 @@ func Deployment(cluster *v1alpha1.Cluster, publicKeyPEM, pageserverToken, contro
 							VolumeMounts: []corev1.VolumeMount{
 								utils.JWTVolumeMount(),
 							},
+							Resources: storagecontrollerResources(cluster),
 							// Health probes using upstream SC endpoints.
 							// /live  checks startup_complete AND is_leader (non-leaders return 503).
 							// /ready checks startup_complete only (candidates can receive traffic).

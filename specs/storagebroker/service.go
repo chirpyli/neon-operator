@@ -20,9 +20,7 @@ func Service(cluster *v1alpha1.Cluster) *corev1.Service {
 			},
 		},
 		Spec: corev1.ServiceSpec{
-			Selector: map[string]string{
-				"app.kubernetes.io/name": name,
-			},
+			Selector: LabelSelector(cluster.Name),
 			Ports: []corev1.ServicePort{
 				{
 					Name:       "http",
