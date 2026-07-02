@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -376,6 +377,14 @@ func (r *ClusterReconciler) finalize(ctx context.Context, cluster *neonv1alpha1.
 // 跳过优雅 drain，直接标记节点为 Deleting 并执行 tombstone。
 // 由于 Project 已全部清理（tenant/timeline 已删除），
 // 此时节点上不应有任何 attached shard，force 删除是安全的。
+//
+// 重要：tombstone 完成后还必须调用 DeleteTombstone 物理删除记录，
+// 否则相同 node_id 的新 pageserver re-attach 时会被 SC 拒绝：
+//
+//	persistence.rs re_attach():
+//	  "Node {id} is marked as deleted, re-attach is not allowed"
+//
+// 这会导致删集群重建时新 pageserver 永远无法注册（0/1 Ready）。
 func (r *ClusterReconciler) cleanupPageserverNodes(ctx context.Context, cluster *neonv1alpha1.Cluster) {
 	log := logf.FromContext(ctx)
 
@@ -399,13 +408,62 @@ func (r *ClusterReconciler) cleanupPageserverNodes(ctx context.Context, cluster 
 
 		// force=true：跳过优雅 drain，直接标记 tombstone
 		if err := r.SCClient.StartNodeDelete(ctx, cluster.Name, cluster.Namespace, ps.Spec.ID, true); err != nil {
-			log.Error(err, "Cluster 终止清理：StartNodeDelete 失败（非阻塞）",
+			// 如果节点已不在 SC（可能已被 Pageserver finalizer 清理），尝试物理删除 tombstone
+			if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
+				log.Info("节点不在 SC 内存中，尝试物理删除 tombstone 记录",
+					"nodeID", ps.Spec.ID)
+				if tErr := r.SCClient.DeleteTombstone(ctx, cluster.Name, cluster.Namespace, ps.Spec.ID); tErr != nil {
+					log.Error(tErr, "Cluster 终止清理：DeleteTombstone 失败（非阻塞）",
+						"nodeID", ps.Spec.ID)
+				}
+			} else {
+				log.Error(err, "Cluster 终止清理：StartNodeDelete 失败（非阻塞）",
+					"nodeID", ps.Spec.ID, "pageserver", ps.Name)
+			}
+			continue
+		}
+
+		// 等待 tombstone 完成并物理删除记录。
+		// force=true 且无 tenant（Project 已清理），delete 应几乎瞬间完成。
+		if err := r.waitForTombstoneAndDelete(ctx, cluster, ps.Spec.ID); err != nil {
+			log.Error(err, "Cluster 终止清理：等待 tombstone 或物理删除失败（非阻塞）",
 				"nodeID", ps.Spec.ID, "pageserver", ps.Name)
 		} else {
-			log.Info("Cluster 终止清理：节点已提交 tombstone",
+			log.Info("Cluster 终止清理：节点已完全清理（tombstone 已物理删除）",
 				"nodeID", ps.Spec.ID, "pageserver", ps.Name)
 		}
 	}
+}
+
+// waitForTombstoneAndDelete 轮询 SC 直到节点从内存中移除（tombstone 完成），
+// 然后物理删除 tombstone 记录。
+// 在 Cluster 删除流程中使用，确保 SC 数据库不留残留记录。
+func (r *ClusterReconciler) waitForTombstoneAndDelete(ctx context.Context, cluster *neonv1alpha1.Cluster, nodeID uint64) error {
+	log := logf.FromContext(ctx)
+
+	const maxRetries = 6
+	const pollInterval = 5 * time.Second
+
+	for i := 0; i < maxRetries; i++ {
+		_, err := r.SCClient.GetNode(ctx, cluster.Name, cluster.Namespace, nodeID)
+		if err != nil {
+			// 节点已从内存移除（tombstone 完成），物理删除记录
+			if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
+				log.Info("tombstone 完成，正在物理删除记录", "nodeID", nodeID)
+				return r.SCClient.DeleteTombstone(ctx, cluster.Name, cluster.Namespace, nodeID)
+			}
+			// 其他错误，继续重试
+			log.Info("查询节点状态失败，继续重试", "nodeID", nodeID, "error", err, "attempt", i+1)
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+
+	return fmt.Errorf("等待节点 %d tombstone 超时", nodeID)
 }
 
 // cleanupSafekeeperNodes 在 Cluster 删除前强制 Decommission 所有 Safekeeper 节点。

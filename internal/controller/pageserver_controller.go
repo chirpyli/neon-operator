@@ -20,12 +20,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -154,12 +156,20 @@ func (r *PageserverReconciler) reconcile(ctx context.Context, pageserver *neonv1
 
 // finalize 处理 Pageserver 的安全下线。
 //
+// 对于永久移除（缩容），正确的 SC API 是 StartNodeDelete（PUT /node/:id/delete），
+// 而非 StartNodeDrain。原因：
+//
+//   - Drain 是 best-effort：只迁移有 secondary 的 HA tenant shard，非 HA tenant 会被跳过。
+//     drain 完成后 SC 将调度策略设为 PauseForRestart，但节点上可能仍有 attached shard。
+//   - Delete 会迁移**所有** shard（包括非 HA），然后调用 set_tombstone 永久删除节点记录。
+//     StartNodeDelete 接受 Active 或 Pause 状态作为起始态。
+//
 // 流程：
 //
-//	Phase 0: 准入检查（确认有其他可调度节点）
-//	Phase 1: 启动 SC Drain
-//	Phase 2: 轮询监控 Drain 进度（检查 attached shard count）
-//	Phase 3: Drain 完成 → 设 PauseForRestart + 可选 Delete → 移除 Finalizer
+//	Phase 0: 获取节点当前调度策略
+//	Phase 1: 根据当前状态转换到可删除状态（Active/Pause），调用 StartNodeDelete
+//	Phase 2: 轮询 GetNode 直到 404（节点已被 tombstone 并从 SC 移除）
+//	Phase 3: 移除 Finalizer
 func (r *PageserverReconciler) finalize(ctx context.Context, ps *neonv1alpha1.Pageserver) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
@@ -167,41 +177,46 @@ func (r *PageserverReconciler) finalize(ctx context.Context, ps *neonv1alpha1.Pa
 		return ctrl.Result{}, nil
 	}
 
-	log.Info("Finalizing Pageserver deletion (drain phase)", "pageserver", ps.Name)
+	log.Info("Finalizing Pageserver deletion", "pageserver", ps.Name)
 
 	// 更新状态，标记正在进行终止清理
 	_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
 		p.Status.ObservedGeneration = p.Generation
 		utils.SetCondition(p, p.StatusConditions(), utils.ConditionTerminating,
 			metav1.ConditionTrue, utils.ReasonTerminating,
-			"Pageserver 正在安全下线（Drain）")
+			"Pageserver 正在安全下线")
 	})
 
 	if r.SCClient == nil {
-		log.Info("SCClient 未配置，跳过 drain，直接移除 finalizer")
+		log.Info("SCClient 未配置，跳过 SC 清理，直接移除 finalizer")
 		return r.removePageserverFinalizer(ctx, ps)
 	}
 
 	clusterName := ps.Spec.Cluster
 	nodeID := ps.Spec.ID
 
-	// Phase 0: 准入检查 — 检查节点状态 + 是否有其他可调度节点
-	allNodes, err := r.SCClient.ListNodeNodes(ctx, clusterName, ps.Namespace)
+	// 检查 force-delete annotation
+	forceDelete := ps.Annotations[utils.ForceDeleteAnnotation] == "true"
+
+	// Phase 0: 获取节点当前状态
+	node, err := r.SCClient.GetNode(ctx, clusterName, ps.Namespace, nodeID)
 	if err != nil {
+		// 节点不在 SC 中（已 tombstone 或从未注册），直接移除 finalizer
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
+			log.Info("节点不在 SC 中，直接移除 finalizer", "nodeID", nodeID)
+			return r.removePageserverFinalizer(ctx, ps)
+		}
+
 		// 判断 SC 是否永久不可达（Cluster CR 已删除 = SC 已被 cascade 删除）
 		clusterCR := &neonv1alpha1.Cluster{}
 		crErr := r.Get(ctx, types.NamespacedName{Name: clusterName, Namespace: ps.Namespace}, clusterCR)
 		if crErr != nil && apierrors.IsNotFound(crErr) {
-			// Cluster 已删除，SC 不再存在，无法执行任何 SC 清理。
-			// Cluster finalizer 应在删除前已完成节点 tombstone（见 B3 修复），
-			// 此处作为最后兜底：直接移除 finalizer。
 			log.Info("Cluster 已删除，SC 不可达，跳过 SC 节点清理", "error", err)
 			return r.removePageserverFinalizer(ctx, ps)
 		}
-		// SC 存在但暂时不可达：保留 finalizer，稍后重试。
-		// 这与旧代码不同——旧代码直接跳过清理移除 finalizer，
-		// 导致节点记录以 Active 状态残留在 SC 数据库中。
-		log.Info("无法连接 SC 进行准入检查，保留 finalizer 稍后重试", "error", err)
+
+		// SC 存在但暂时不可达：保留 finalizer，稍后重试
+		log.Info("无法连接 SC 获取节点状态，保留 finalizer 稍后重试", "error", err)
 		_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
 			utils.SetCondition(p, p.StatusConditions(), utils.ConditionDraining,
 				metav1.ConditionFalse, utils.ReasonDrainFailed,
@@ -210,54 +225,95 @@ func (r *PageserverReconciler) finalize(ctx context.Context, ps *neonv1alpha1.Pa
 		return ctrl.Result{RequeueAfter: drainPollInterval}, nil
 	}
 
-	var currentScheduling string
-	schedulableCount := 0
-	for _, n := range allNodes {
-		if n.ID == nodeID {
-			currentScheduling = n.Scheduling
-		}
-		if n.ID != nodeID && n.Availability == "Active" {
-			if n.Scheduling == "Active" || n.Scheduling == "Filling" {
-				schedulableCount++
+	currentScheduling := node.Scheduling
+	log.Info("节点当前 SC 调度策略", "nodeID", nodeID, "scheduling", currentScheduling)
+
+	// 如果节点卡在 Deleting 状态（SC 后台删除任务已失败），
+	// 检查 attached shard 数量：若为 0，说明 shard 已迁移完成，
+	// 可以安全地用 force=true 重新发起删除（跳过调度，直接 tombstone）。
+	if currentScheduling == "Deleting" {
+		shards, shardErr := r.SCClient.GetNodeShards(ctx, clusterName, ps.Namespace, nodeID)
+		if shardErr == nil {
+			attachedCount := 0
+			for _, s := range shards {
+				if s.Attached {
+					attachedCount++
+				}
+			}
+			if attachedCount == 0 {
+				log.Info("节点卡在 Deleting 但无 attached shard，用 force=true 重新删除（跳过调度直接 tombstone）",
+					"nodeID", nodeID)
+				// 先取消当前的 delete 操作（将 scheduling 恢复为 Active），
+				// 然后用 force=true 重新发起。
+				if err := r.SCClient.CancelNodeDelete(ctx, clusterName, ps.Namespace, nodeID); err != nil {
+					log.Info("CancelNodeDelete 失败（可能后台任务已结束），继续尝试 force delete", "error", err)
+				}
+				// 标记需要在下一轮使用 force=true 重试
+				_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
+					utils.SetCondition(p, p.StatusConditions(), utils.ConditionDraining,
+						metav1.ConditionTrue, utils.ReasonForceDelete,
+						"SC 后台删除失败（Impossible constraint），将在下一轮用 force=true 重试")
+				})
+				return ctrl.Result{RequeueAfter: drainPollInterval}, nil
 			}
 		}
+		// 仍有 attached shard 或查询失败，继续监控
+		return r.monitorNodeDeletion(ctx, ps)
 	}
 
-	// 如果节点已经不在 SC 中（已删除或从未注册），直接移除 finalizer
-	if currentScheduling == "" && len(allNodes) > 0 {
-		log.Info("节点未在 SC 中注册，跳过 drain，直接移除 finalizer",
-			"nodeID", nodeID)
-		return r.removePageserverFinalizer(ctx, ps)
-	}
+	// Phase 1: 根据当前状态启动或继续节点删除
+	switch currentScheduling {
+	case "Deleting":
+		// 删除已在进行中，直接进入监控
+		log.Info("节点已在 Deleting 状态，进入监控", "nodeID", nodeID)
+		return r.monitorNodeDeletion(ctx, ps)
 
-	// 如果节点已经在 Draining 状态，跳到 Phase 2
-	if currentScheduling == "Draining" {
-		log.Info("节点已在 Draining，跳过 Phase 1，直接进入监控",
-			"nodeID", nodeID)
-		return r.monitorDrainProgress(ctx, ps)
-	}
+	case "Active", "Pause":
+		// 可直接调用 StartNodeDelete
+		// 如果之前 force=false 的删除因 Impossible constraint 失败，
+		// 且 shard 已迁移完成（attachedCount=0），自动升级为 force=true。
+		effectiveForce := forceDelete
+		if !effectiveForce {
+			// 检查是否有之前 force delete 失败的标记
+			if cond := meta.FindStatusCondition(ps.Status.Conditions, utils.ConditionDraining); cond != nil &&
+				cond.Status == metav1.ConditionTrue && cond.Reason == utils.ReasonForceDelete {
+				effectiveForce = true
+				log.Info("检测到之前 force=false 删除失败，自动升级为 force=true", "nodeID", nodeID)
+			}
+		}
 
-	// 检查是否单节点集群（无法 drain）
-	if schedulableCount == 0 {
-		log.Info("无其他可调度节点，无法 drain。如需强制删除，请添加 force-delete annotation",
-			"nodeID", nodeID)
-		_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
-			utils.SetCondition(p, p.StatusConditions(), utils.ConditionDraining,
-				metav1.ConditionFalse, utils.ReasonNoSchedulableNodes,
-				"无其他可调度节点，无法 drain")
-		})
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-
-	// Phase 1: 启动 Drain
-	if currentScheduling == "Active" {
-		log.Info("启动 SC Drain", "nodeID", nodeID)
-		if err := r.SCClient.StartNodeDrain(ctx, clusterName, ps.Namespace, nodeID); err != nil {
-			log.Error(err, "启动 drain 失败")
+		log.Info("启动 SC Node Delete", "nodeID", nodeID, "force", effectiveForce)
+		if err := r.SCClient.StartNodeDelete(ctx, clusterName, ps.Namespace, nodeID, effectiveForce); err != nil {
+			// 检查是否因无其他可调度节点而失败
+			if strings.Contains(err.Error(), "No other schedulable nodes") && !forceDelete {
+				log.Info("无其他可调度节点且未启用 force-delete，保留 finalizer",
+					"nodeID", nodeID)
+				_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
+					utils.SetCondition(p, p.StatusConditions(), utils.ConditionDraining,
+						metav1.ConditionFalse, utils.ReasonNoSchedulableNodes,
+						"无其他可调度节点，无法安全删除。添加 force-delete annotation 可强制删除")
+				})
+				return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+			}
+			// SC 返回 "Node node_id not found for update"（500）表示节点在 SC 内存中存在
+			// 但数据库记录已被删除（可能由之前的手动 tombstone 清理导致）。
+			// 这种状态下节点已无法通过正常 API 管理，直接移除 finalizer。
+			// SC 重启后会从数据库重新加载节点列表，内存中的残留节点会自动消失。
+			if strings.Contains(err.Error(), "not found for update") {
+				log.Info("节点在 SC 数据库中已不存在（内存残留），直接移除 finalizer",
+					"nodeID", nodeID, "error", err)
+				_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
+					utils.SetCondition(p, p.StatusConditions(), utils.ConditionDrainComplete,
+						metav1.ConditionTrue, utils.ReasonAsExpected,
+						"节点在 SC 数据库中已不存在（内存残留），SC 重启后自动清理")
+				})
+				return r.removePageserverFinalizer(ctx, ps)
+			}
+			log.Error(err, "启动 node delete 失败")
 			_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
 				utils.SetCondition(p, p.StatusConditions(), utils.ConditionDraining,
 					metav1.ConditionFalse, utils.ReasonDrainFailed,
-					fmt.Sprintf("启动 drain 失败: %v", err))
+					fmt.Sprintf("启动 node delete 失败: %v", err))
 			})
 			return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 		}
@@ -265,89 +321,191 @@ func (r *PageserverReconciler) finalize(ctx context.Context, ps *neonv1alpha1.Pa
 		_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
 			utils.SetCondition(p, p.StatusConditions(), utils.ConditionDraining,
 				metav1.ConditionTrue, utils.ReasonDrainStarted,
-				"Drain 已启动，正在迁移 shard")
+				"Node Delete 已启动，SC 正在迁移 shard 并 tombstone 节点")
 		})
-		log.Info("Drain 已启动，进入监控阶段", "nodeID", nodeID)
-	}
+		log.Info("Node Delete 已启动，进入监控阶段", "nodeID", nodeID)
+		return r.monitorNodeDeletion(ctx, ps)
 
-	// Phase 2: 监控 Drain 进度
-	return r.monitorDrainProgress(ctx, ps)
+	case "Draining":
+		// 之前可能由旧代码启动了 drain。Drain 完成后 SC 会设为 PauseForRestart。
+		// 等待 drain 完成，然后转换为 Pause 再删除。
+		log.Info("节点处于 Draining 状态（可能由之前的 drain 操作启动），等待 drain 完成后转换", "nodeID", nodeID)
+		return r.waitForDrainThenDelete(ctx, ps)
+
+	case "PauseForRestart":
+		// Drain 已完成（SC 自动设置的）。需要先转回 Pause 才能调用 StartNodeDelete。
+		log.Info("节点处于 PauseForRestart（drain 已完成），转换为 Pause 后启动删除", "nodeID", nodeID)
+		pausePolicy := "Pause"
+		if err := r.SCClient.ConfigureNode(ctx, clusterName, ps.Namespace, nodeID, nil, &pausePolicy); err != nil {
+			log.Error(err, "ConfigureNode(Pause) 失败，稍后重试")
+			return ctrl.Result{RequeueAfter: drainPollInterval}, nil
+		}
+		// 转换成功后，下一轮 reconcile 会以 Pause 状态进入 StartNodeDelete 路径
+		return ctrl.Result{RequeueAfter: drainPollInterval}, nil
+
+	case "Filling":
+		// 取消 Filling（SC 会恢复为 Active），下一轮 reconcile 再删除
+		log.Info("节点处于 Filling 状态，取消 fill 后重试删除", "nodeID", nodeID)
+		if err := r.SCClient.CancelNodeFill(ctx, clusterName, ps.Namespace, nodeID); err != nil {
+			log.Info("CancelNodeFill 失败，稍后重试", "error", err)
+		}
+		return ctrl.Result{RequeueAfter: drainPollInterval}, nil
+
+	default:
+		log.Info("节点处于未知调度策略，稍后重试", "nodeID", nodeID, "scheduling", currentScheduling)
+		return ctrl.Result{RequeueAfter: drainPollInterval}, nil
+	}
 }
 
-// monitorDrainProgress 轮询 SC 检查 drain 进度，直到所有 attached shard 迁移完成。
-func (r *PageserverReconciler) monitorDrainProgress(ctx context.Context, ps *neonv1alpha1.Pageserver) (ctrl.Result, error) {
+// waitForDrainThenDelete 等待 drain 完成（scheduling 变为 PauseForRestart），
+// 然后将调度策略转为 Pause 并启动 StartNodeDelete。
+// 用于处理节点因旧代码或外部操作已处于 Draining 状态的情况。
+func (r *PageserverReconciler) waitForDrainThenDelete(ctx context.Context, ps *neonv1alpha1.Pageserver) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 
 	clusterName := ps.Spec.Cluster
 	nodeID := ps.Spec.ID
 
-	// 查询节点上的 shard 列表
-	shards, err := r.SCClient.GetNodeShards(ctx, clusterName, ps.Namespace, nodeID)
+	node, err := r.SCClient.GetNode(ctx, clusterName, ps.Namespace, nodeID)
 	if err != nil {
-		log.Info("查询 SC shard 状态失败，稍后重试", "error", err, "nodeID", nodeID)
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
+			return r.removePageserverFinalizer(ctx, ps)
+		}
+		log.Info("查询节点状态失败，稍后重试", "error", err)
 		return ctrl.Result{RequeueAfter: drainPollInterval}, nil
 	}
 
-	// 计算 attached shard 数量
-	attachedCount := 0
-	for _, s := range shards {
-		if s.Attached {
-			attachedCount++
+	switch node.Scheduling {
+	case "PauseForRestart":
+		// Drain 完成，转为 Pause 后删除
+		log.Info("Drain 已完成（PauseForRestart），转换为 Pause 后启动删除", "nodeID", nodeID)
+		pausePolicy := "Pause"
+		if err := r.SCClient.ConfigureNode(ctx, clusterName, ps.Namespace, nodeID, nil, &pausePolicy); err != nil {
+			log.Error(err, "ConfigureNode(Pause) 失败，稍后重试")
+			return ctrl.Result{RequeueAfter: drainPollInterval}, nil
 		}
-	}
+		return ctrl.Result{RequeueAfter: drainPollInterval}, nil
 
-	log.Info("Drain 进度", "nodeID", nodeID, "attachedCount", attachedCount)
+	case "Active":
+		// Drain 被取消或 SC 重启后重置为 Active，直接启动删除
+		log.Info("节点已回到 Active（drain 被取消或 SC 重启），直接启动删除", "nodeID", nodeID)
+		return ctrl.Result{Requeue: true}, nil
 
-	// 更新 Status 中的 shard 计数
-	_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
-		p.Status.SCAttachedShardCount = int32(attachedCount)
-		p.Status.SCTotalShardCount = int32(len(shards))
-	})
-
-	if attachedCount == 0 {
-		// Phase 3: Drain 完成
-		log.Info("Drain 完成，所有 attached shard 已迁移", "nodeID", nodeID)
-
-		// 显式设置 PauseForRestart（SC 不会自动切换）
-		pauseScheduling := "PauseForRestart"
-		if err := r.SCClient.ConfigureNode(ctx, clusterName, ps.Namespace, nodeID, nil, &pauseScheduling); err != nil {
-			log.Info("ConfigureNode(PauseForRestart) 失败，继续删除流程", "error", err)
-		}
-
-		// 标记为 Deleting：通过 PUT /node/{id}/delete?force=false 启动 SC 异步后台任务，
-		// SC 会迁移所有 shard 然后 set_tombstone（lifecycle='Deleted'）。
-		// 错误不静默忽略：SC 调用失败意味着节点未被 tombstone，
-		// 会导致 SC 数据库残留 active 节点记录。
-		if err := r.SCClient.StartNodeDelete(ctx, clusterName, ps.Namespace, nodeID, false); err != nil {
-			log.Error(err, "StartNodeDelete 失败，保留 finalizer 稍后重试", "nodeID", nodeID)
+	case "Draining":
+		// Drain 仍在进行，检查超时
+		drainDuration := time.Since(ps.DeletionTimestamp.Time)
+		if drainDuration > drainTimeout {
+			log.Info("Drain 超时，强制取消 drain 并启动删除", "nodeID", nodeID, "duration", drainDuration)
 			_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
-				utils.SetCondition(p, p.StatusConditions(), utils.ConditionDrainComplete,
-					metav1.ConditionFalse, utils.ReasonDrainFailed,
-					fmt.Sprintf("StartNodeDelete 失败: %v", err))
+				utils.SetCondition(p, p.StatusConditions(), utils.ConditionDrainTimeout,
+					metav1.ConditionTrue, utils.ReasonDrainStuck,
+					fmt.Sprintf("Drain 超时 (%v)，正在取消并强制删除", drainDuration))
 			})
+			// 取消 drain，SC 会将调度策略恢复为 Active
+			if err := r.SCClient.CancelNodeDrain(ctx, clusterName, ps.Namespace, nodeID); err != nil {
+				log.Info("CancelNodeDrain 失败，稍后重试", "error", err)
+				return ctrl.Result{RequeueAfter: drainPollInterval}, nil
+			}
 			return ctrl.Result{RequeueAfter: drainPollInterval}, nil
 		}
 
-		_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
-			utils.SetCondition(p, p.StatusConditions(), utils.ConditionDrainComplete,
-				metav1.ConditionTrue, utils.ReasonAsExpected,
-				"Drain 完成，所有 shard 已迁移")
-			p.Status.SCSchedulingPolicy = "PauseForRestart"
-		})
+		// 更新 shard 计数到 Status
+		if shards, err := r.SCClient.GetNodeShards(ctx, clusterName, ps.Namespace, nodeID); err == nil {
+			attachedCount := 0
+			for _, s := range shards {
+				if s.Attached {
+					attachedCount++
+				}
+			}
+			_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
+				p.Status.SCAttachedShardCount = int32(attachedCount)
+				p.Status.SCTotalShardCount = int32(len(shards))
+			})
+			log.Info("Drain 进行中", "nodeID", nodeID, "attachedCount", attachedCount, "duration", drainDuration)
+		}
+		return ctrl.Result{RequeueAfter: drainPollInterval}, nil
 
-		return r.removePageserverFinalizer(ctx, ps)
+	default:
+		// 其他状态（如 Deleting），直接进入删除监控
+		return r.monitorNodeDeletion(ctx, ps)
+	}
+}
+
+// monitorNodeDeletion 轮询 SC 检查节点是否已被 tombstone 并移除。
+// SC 的 delete_node 完成后会调用 set_tombstone 并从内存中移除节点，
+// 此时 GET /control/v1/node/:id 会返回 404。
+//
+// 重要：tombstone 后必须调用 DeleteTombstone 物理删除 SC 数据库中的节点记录，
+// 否则相同 node_id 的新 pageserver re-attach 时会被 SC 拒绝：
+//
+//	persistence.rs re_attach():
+//	  "Node {id} is marked as deleted, re-attach is not allowed"
+//
+// 这会导致缩容后再扩容（或删集群重建）时新 pageserver 永远无法注册。
+func (r *PageserverReconciler) monitorNodeDeletion(ctx context.Context, ps *neonv1alpha1.Pageserver) (ctrl.Result, error) {
+	log := logf.FromContext(ctx)
+
+	clusterName := ps.Spec.Cluster
+	nodeID := ps.Spec.ID
+
+	node, err := r.SCClient.GetNode(ctx, clusterName, ps.Namespace, nodeID)
+	if err != nil {
+		// 节点已从 SC 内存中移除（tombstone 完成）。
+		// 但 SC 数据库中仍保留 lifecycle='Deleted' 的 tombstone 记录，
+		// 必须物理删除，否则相同 ID 的新节点无法 re-attach。
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") {
+			log.Info("节点已从 SC 内存移除（tombstone 完成），正在物理删除 tombstone 记录", "nodeID", nodeID)
+			if err := r.SCClient.DeleteTombstone(ctx, clusterName, ps.Namespace, nodeID); err != nil {
+				// DeleteTombstone 可能因 tombstone 尚未落库而失败，稍后重试
+				log.Info("DeleteTombstone 失败，稍后重试", "nodeID", nodeID, "error", err)
+				return ctrl.Result{RequeueAfter: drainPollInterval}, nil
+			}
+			log.Info("tombstone 记录已物理删除，移除 finalizer", "nodeID", nodeID)
+			_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
+				utils.SetCondition(p, p.StatusConditions(), utils.ConditionDrainComplete,
+					metav1.ConditionTrue, utils.ReasonAsExpected,
+					"节点已从 SC 完全移除（tombstone 已物理删除）")
+			})
+			return r.removePageserverFinalizer(ctx, ps)
+		}
+		log.Info("查询节点状态失败，稍后重试", "error", err)
+		return ctrl.Result{RequeueAfter: drainPollInterval}, nil
+	}
+
+	// 节点仍然存在，更新 Status
+	_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
+		p.Status.SCSchedulingPolicy = node.Scheduling
+		p.Status.SCAvailability = node.Availability
+	})
+
+	// 更新 shard 计数（用于可观测性）
+	if shards, err := r.SCClient.GetNodeShards(ctx, clusterName, ps.Namespace, nodeID); err == nil {
+		attachedCount := 0
+		for _, s := range shards {
+			if s.Attached {
+				attachedCount++
+			}
+		}
+		_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
+			p.Status.SCAttachedShardCount = int32(attachedCount)
+			p.Status.SCTotalShardCount = int32(len(shards))
+		})
+		log.Info("节点删除进行中", "nodeID", nodeID, "scheduling", node.Scheduling,
+			"attachedShards", attachedCount)
 	}
 
 	// 检查超时
-	drainDuration := time.Since(ps.DeletionTimestamp.Time)
-	if drainDuration > drainTimeout {
-		log.Info("Drain 超时", "nodeID", nodeID, "duration", drainDuration)
+	deleteDuration := time.Since(ps.DeletionTimestamp.Time)
+	if deleteDuration > drainTimeout {
+		log.Info("节点删除超时", "nodeID", nodeID, "duration", deleteDuration,
+			"scheduling", node.Scheduling)
 		_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
 			utils.SetCondition(p, p.StatusConditions(), utils.ConditionDrainTimeout,
 				metav1.ConditionTrue, utils.ReasonDrainStuck,
-				fmt.Sprintf("Drain 超时 (%v)，仍有 %d 个 attached shard", drainDuration, attachedCount))
+				fmt.Sprintf("节点删除超时 (%v)，当前调度策略: %s。"+
+					"如需强制删除，请添加 %s annotation",
+					deleteDuration, node.Scheduling, utils.ForceDeleteAnnotation))
 		})
-		// 继续等待而不是强制删除（除非有 force-delete annotation）
 	}
 
 	// 继续轮询

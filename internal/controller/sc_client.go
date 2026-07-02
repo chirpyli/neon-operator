@@ -298,11 +298,6 @@ type NodeDescribeResponse struct {
 	AvailabilityZone string `json:"availability_zone_id"`
 }
 
-// NodeListResponse 对应 SC 的 GET /control/v1/node 响应。
-type NodeListResponse struct {
-	Nodes []NodeDescribeResponse `json:"nodes"`
-}
-
 // ShardDescribeResponse 对应 SC 的 shard 信息，
 // 用于 GET /control/v1/node/:id/shards 端点。
 type ShardDescribeResponse struct {
@@ -340,6 +335,8 @@ func (c *SCClient) GetNode(ctx context.Context, clusterName, namespace string, n
 }
 
 // ListNodeNodes 调用 GET /control/v1/node 列出所有节点。
+// 注意：SC 的 /control/v1/node 端点返回裸 JSON 数组 [{...}, ...]，
+// 而非 {"nodes": [...]} 包裹对象。因此直接反序列化为 []NodeDescribeResponse。
 func (c *SCClient) ListNodeNodes(ctx context.Context, clusterName, namespace string) ([]NodeDescribeResponse, error) {
 	baseURL := c.baseURL(clusterName)
 	url := fmt.Sprintf("%s/control/v1/node", baseURL)
@@ -349,11 +346,11 @@ func (c *SCClient) ListNodeNodes(ctx context.Context, clusterName, namespace str
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
 
-	var result NodeListResponse
-	if err := json.Unmarshal(resp, &result); err != nil {
+	var nodes []NodeDescribeResponse
+	if err := json.Unmarshal(resp, &nodes); err != nil {
 		return nil, fmt.Errorf("unmarshal node list response: %w", err)
 	}
-	return result.Nodes, nil
+	return nodes, nil
 }
 
 // GetNodeShards 调用 GET /control/v1/node/:node_id/shards 列出节点上的 shard。

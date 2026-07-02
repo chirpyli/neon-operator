@@ -20,4 +20,10 @@ const (
 	// FinalizerName 是所有 neon-operator CRD 统一使用的 Finalizer 字符串。
 	// 它确保外部资源（Storage Controller 中的记录）在 Kubernetes 资源从 etcd 中删除之前被清理。
 	FinalizerName = "neon.oltp.molnett.org/finalizer"
+
+	// ForceDeleteAnnotation 是 Pageserver CR 上的 annotation，用于强制删除节点。
+	// 设置后，finalize 会跳过优雅迁移直接调用 StartNodeDelete(force=true)，
+	// SC 将立即移除 observed location 并 tombstone 节点。
+	// 使用场景：无其他可调度节点、shard 无法迁移、或需要快速清理时。
+	ForceDeleteAnnotation = "neon.oltp.molnett.org/force-delete"
 )
