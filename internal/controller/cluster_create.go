@@ -83,6 +83,28 @@ func (r *ClusterReconciler) reconcileSafekeepers(
 		existingMap[sk.Spec.ID] = sk
 	}
 
+	// 同步节点故障恢复配置到已存在的 Safekeeper CR。
+	// 这样在升级 operator 后，已有 Safekeeper 也能获得 NodeFailure 配置，
+	// 无需手动重建 CR。
+	var desiredNodeFailure *neonv1alpha1.NodeFailureRecoveryConfig
+	if cluster.Spec.DefaultSafekeeperConfig != nil {
+		desiredNodeFailure = cluster.Spec.DefaultSafekeeperConfig.NodeFailure
+	}
+	for _, sk := range existingMap {
+		if sk.Spec.ID > uint32(desired) {
+			continue // 跳过即将被删除的 CR
+		}
+		if !equality.Semantic.DeepEqual(sk.Spec.NodeFailure, desiredNodeFailure) {
+			patched := sk.DeepCopy()
+			patched.Spec.NodeFailure = desiredNodeFailure
+			if err := r.Patch(ctx, patched, client.MergeFrom(sk)); err != nil {
+				return fmt.Errorf("更新 safekeeper %d NodeFailure 配置: %w", sk.Spec.ID, err)
+			}
+			logf.FromContext(ctx).Info("已同步 Safekeeper NodeFailure 配置",
+				"safekeeper", sk.Name, "nodeFailure", desiredNodeFailure)
+		}
+	}
+
 	// 创建缺失的 Safekeeper CR（ID 从 1 开始）
 	for id := uint32(1); id <= uint32(desired); id++ {
 		if _, exists := existingMap[id]; !exists {
@@ -130,6 +152,11 @@ func (r *ClusterReconciler) createSafekeeper(
 			Cluster:       cluster.Name,
 			StorageConfig: storageConfig,
 		},
+	}
+
+	// 传递节点故障恢复配置
+	if cluster.Spec.DefaultSafekeeperConfig != nil && cluster.Spec.DefaultSafekeeperConfig.NodeFailure != nil {
+		sk.Spec.NodeFailure = cluster.Spec.DefaultSafekeeperConfig.NodeFailure
 	}
 
 	if err := ctrl.SetControllerReference(cluster, sk, r.Scheme); err != nil {

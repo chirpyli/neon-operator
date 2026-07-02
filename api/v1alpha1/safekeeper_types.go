@@ -43,6 +43,10 @@ type SafekeeperSpec struct {
 	// PVC configuration
 	StorageConfig StorageConfig `json:"storageConfig"`
 
+	// NodeFailure 控制节点故障时的自动恢复策略。
+	// +optional
+	NodeFailure *NodeFailureRecoveryConfig `json:"nodeFailure,omitempty"`
+
 	// LivenessProbe overrides the default liveness probe configuration.
 	// When nil, the operator uses built-in defaults aligned with SC's
 	// max_offline_interval (30s).

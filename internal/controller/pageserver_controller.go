@@ -31,10 +31,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	neonv1alpha1 "oltp.molnett.org/neon-operator/api/v1alpha1"
 	pageserverspec "oltp.molnett.org/neon-operator/specs/pageserver"
@@ -564,13 +567,19 @@ func (r *PageserverReconciler) syncSCState(ctx context.Context, ps *neonv1alpha1
 	})
 }
 
-// handleNodeFailure 检测并处理本地盘 PVC 粘滞导致的 Pod Pending 问题。
-// 返回 (requeue, error)。当 Pod 因 volume node affinity conflict 处于
-// Pending 状态超过阈值时，删除 PVC 和 Pod 以触发 StatefulSet 重建。
+// handleNodeFailure 检测并处理节点故障导致的 Pod 不可用问题。
+// 返回 (requeue, error)。支持以下场景：
+// 1. Pod 因 volume node affinity conflict 处于 Pending 状态超过阈值
+// 2. Pod 处于 Running 状态但 Ready=False，且所在节点 NotReady 超过阈值
+// 3. Pod 处于 Terminating 状态超过阈值（节点不可达导致删除卡住）
+// 4. Pod 处于 Failed 状态
+// 5. Pod 处于 Unknown 状态且所在节点 NotReady 超过阈值
+// 触发恢复时，删除 PVC 和 Pod 以触发 StatefulSet 重建。
+//
+// 注意：Pod 进入 Terminating 状态时 status.phase 仍保持为 Running（或 Pending），
+// 仅 metadata.deletionTimestamp 被设置。因此必须先检查 deletionTimestamp，
+// 再按 phase 分发，否则 Terminating 的 Pod 会错误地走 Running/Pending 分支。
 func (r *PageserverReconciler) handleNodeFailure(ctx context.Context, ps *neonv1alpha1.Pageserver) (bool, error) {
-	log := logf.FromContext(ctx)
-
-	// 节点故障恢复未启用
 	if ps.Spec.NodeFailure == nil || !ps.Spec.NodeFailure.AutoRecover {
 		return false, nil
 	}
@@ -585,28 +594,46 @@ func (r *PageserverReconciler) handleNodeFailure(ctx context.Context, ps *neonv1
 	err := r.Get(ctx, types.NamespacedName{Name: podName, Namespace: ps.Namespace}, pod)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			return false, nil // Pod 尚未创建
+			return false, nil
 		}
 		return false, fmt.Errorf("获取 pod: %w", err)
 	}
 
-	// 只处理 Pending 状态的 Pod
-	if pod.Status.Phase != corev1.PodPending {
-		return false, nil
+	// Terminating 检查必须先于 phase 分发：deletionTimestamp 被设置后，
+	// Pod 的 status.phase 不会改变（仍为 Running/Pending），若先按 phase
+	// 分发，Terminating 的 Pod 会被错误地路由到 handleRunningPodFailure，
+	// 导致 handleTerminatingPodFailure 永远无法被执行。
+	if pod.DeletionTimestamp != nil {
+		return r.handleTerminatingPodFailure(ctx, ps, pod, podName, threshold)
 	}
 
-	// 检查是否因 volume node affinity conflict 导致 Pending
+	switch pod.Status.Phase {
+	case corev1.PodPending:
+		return r.handlePendingPodFailure(ctx, ps, pod, podName, threshold)
+	case corev1.PodRunning:
+		return r.handleRunningPodFailure(ctx, ps, pod, podName, threshold)
+	case corev1.PodFailed:
+		return r.handleFailedPodFailure(ctx, ps, pod, podName)
+	case corev1.PodUnknown:
+		return r.handleUnknownPodFailure(ctx, ps, pod, podName, threshold)
+	}
+
+	return false, nil
+}
+
+// handlePendingPodFailure 处理 Pending 状态的 Pod 故障（volume node affinity conflict）
+func (r *PageserverReconciler) handlePendingPodFailure(ctx context.Context, ps *neonv1alpha1.Pageserver, pod *corev1.Pod, podName string, threshold time.Duration) (bool, error) {
+	log := logf.FromContext(ctx)
+
 	hasVolumeConflict := false
 	for _, c := range pod.Status.Conditions {
 		if c.Type == corev1.PodScheduled && c.Status == corev1.ConditionFalse &&
 			c.Reason == corev1.PodReasonUnschedulable {
-			// 可能在等待调度或 volume conflict
 			for _, cs := range pod.Status.ContainerStatuses {
 				if cs.State.Waiting != nil && cs.State.Waiting.Reason == "" {
 					hasVolumeConflict = true
 				}
 			}
-			// 也检查 pod conditions message
 			if c.Message != "" {
 				hasVolumeConflict = true
 			}
@@ -616,39 +643,208 @@ func (r *PageserverReconciler) handleNodeFailure(ctx context.Context, ps *neonv1
 	if hasVolumeConflict {
 		pendingTime := time.Since(pod.CreationTimestamp.Time)
 		if pendingTime < threshold {
-			return false, nil // 尚未超过阈值
+			return false, nil
 		}
 
 		log.Info("Pod 因 volume node affinity 长时间 Pending，触发自动恢复",
 			"pod", podName, "pending", pendingTime, "threshold", threshold)
 
-		_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
-			utils.SetCondition(p, p.StatusConditions(), utils.ConditionNodeRecoveryInProgress,
-				metav1.ConditionTrue, "VolumeNodeAffinityConflict",
-				fmt.Sprintf("Pod 因 volume node affinity Pending %v，正在删除 PVC 以触发重建", pendingTime))
-		})
-
-		// 删除 Pod（非级联删除 PVC）
-		if err := r.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
-			log.Error(err, "删除 Pending Pod 失败")
-			return true, err
-		}
-
-		// 删除 PVC
-		pvcName := pageserverspec.Name(ps) + "-" + storageVolumeName + "-0"
-		pvc := &corev1.PersistentVolumeClaim{}
-		if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: ps.Namespace}, pvc); err == nil {
-			if err := r.Delete(ctx, pvc); err != nil {
-				log.Error(err, "删除 PVC 失败")
-				return true, err
-			}
-			log.Info("已删除 PVC，StatefulSet 将创建新 PVC 在新节点上", "pvc", pvcName)
-		}
-
-		return true, nil
+		return r.triggerRecovery(ctx, ps, pod, podName, "VolumeNodeAffinityConflict",
+			fmt.Sprintf("Pod 因 volume node affinity Pending %v，正在删除 PVC 以触发重建", pendingTime))
 	}
 
 	return false, nil
+}
+
+// handleRunningPodFailure 处理 Running 状态但节点故障的 Pod
+// 当 Pod Ready=False 且所在节点 NotReady 超过阈值时触发恢复
+func (r *PageserverReconciler) handleRunningPodFailure(ctx context.Context, ps *neonv1alpha1.Pageserver, pod *corev1.Pod, podName string, threshold time.Duration) (bool, error) {
+	log := logf.FromContext(ctx)
+
+	podReady := false
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			podReady = c.Status == corev1.ConditionTrue
+			break
+		}
+	}
+
+	if podReady {
+		return false, nil
+	}
+
+	if pod.Spec.NodeName == "" {
+		return false, nil
+	}
+
+	node := &corev1.Node{}
+	if err := r.Get(ctx, types.NamespacedName{Name: pod.Spec.NodeName}, node); err != nil {
+		log.Info("无法获取节点状态", "node", pod.Spec.NodeName, "error", err)
+		return false, nil
+	}
+
+	nodeReady := false
+	var nodeNotReadySince time.Time
+	for _, c := range node.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			nodeReady = c.Status == corev1.ConditionTrue
+			if !nodeReady && c.LastTransitionTime.IsZero() {
+				nodeNotReadySince = pod.CreationTimestamp.Time
+			} else if !nodeReady {
+				nodeNotReadySince = c.LastTransitionTime.Time
+			}
+			break
+		}
+	}
+
+	if nodeReady {
+		return false, nil
+	}
+
+	nodeNotReadyDuration := time.Since(nodeNotReadySince)
+	if nodeNotReadyDuration < threshold {
+		log.Info("节点 NotReady 时间未超过阈值", "node", pod.Spec.NodeName,
+			"duration", nodeNotReadyDuration, "threshold", threshold)
+		return false, nil
+	}
+
+	log.Info("Pod Running 但 Ready=False，节点 NotReady 超过阈值，触发自动恢复",
+		"pod", podName, "node", pod.Spec.NodeName, "duration", nodeNotReadyDuration, "threshold", threshold)
+
+	return r.triggerRecovery(ctx, ps, pod, podName, "NodeNotReady",
+		fmt.Sprintf("节点 %s NotReady %v，Pod Ready=False，正在删除 PVC 以触发重建", pod.Spec.NodeName, nodeNotReadyDuration))
+}
+
+// handleTerminatingPodFailure 处理 Terminating 状态的 Pod（节点不可达导致删除卡住）
+func (r *PageserverReconciler) handleTerminatingPodFailure(ctx context.Context, ps *neonv1alpha1.Pageserver, pod *corev1.Pod, podName string, threshold time.Duration) (bool, error) {
+	log := logf.FromContext(ctx)
+
+	terminatingDuration := time.Since(pod.DeletionTimestamp.Time)
+	if terminatingDuration < threshold {
+		log.Info("Pod Terminating 时间未超过阈值", "pod", podName, "duration", terminatingDuration)
+		return false, nil
+	}
+
+	if pod.Spec.NodeName != "" {
+		node := &corev1.Node{}
+		if err := r.Get(ctx, types.NamespacedName{Name: pod.Spec.NodeName}, node); err == nil {
+			for _, c := range node.Status.Conditions {
+				if c.Type == corev1.NodeReady && c.Status == corev1.ConditionFalse {
+					log.Info("Pod Terminating 且节点 NotReady，触发自动恢复",
+						"pod", podName, "node", pod.Spec.NodeName)
+					return r.triggerRecovery(ctx, ps, pod, podName, "NodeNotReady",
+						fmt.Sprintf("节点 %s NotReady，Pod Terminating %v", pod.Spec.NodeName, terminatingDuration))
+				}
+			}
+		}
+	}
+
+	log.Info("Pod 卡在 Terminating 状态超过阈值，触发自动恢复",
+		"pod", podName, "duration", terminatingDuration)
+
+	return r.triggerRecovery(ctx, ps, pod, podName, "PodTerminatingStuck",
+		fmt.Sprintf("Pod Terminating %v，正在删除 PVC 以触发重建", terminatingDuration))
+}
+
+// handleFailedPodFailure 处理 Failed 状态的 Pod
+func (r *PageserverReconciler) handleFailedPodFailure(ctx context.Context, ps *neonv1alpha1.Pageserver, pod *corev1.Pod, podName string) (bool, error) {
+	log := logf.FromContext(ctx)
+
+	log.Info("Pod 处于 Failed 状态，触发自动恢复", "pod", podName)
+
+	return r.triggerRecovery(ctx, ps, pod, podName, "PodFailed",
+		fmt.Sprintf("Pod %s Failed，正在删除 PVC 以触发重建", podName))
+}
+
+// handleUnknownPodFailure 处理 Unknown 状态的 Pod（通常表示节点不可达）
+func (r *PageserverReconciler) handleUnknownPodFailure(ctx context.Context, ps *neonv1alpha1.Pageserver, pod *corev1.Pod, podName string, threshold time.Duration) (bool, error) {
+	log := logf.FromContext(ctx)
+
+	if pod.Spec.NodeName == "" {
+		return false, nil
+	}
+
+	node := &corev1.Node{}
+	if err := r.Get(ctx, types.NamespacedName{Name: pod.Spec.NodeName}, node); err != nil {
+		log.Info("无法获取节点状态", "node", pod.Spec.NodeName)
+		return false, nil
+	}
+
+	nodeReady := false
+	var nodeNotReadySince time.Time
+	for _, c := range node.Status.Conditions {
+		if c.Type == corev1.NodeReady {
+			nodeReady = c.Status == corev1.ConditionTrue
+			if !nodeReady && c.LastTransitionTime.IsZero() {
+				nodeNotReadySince = pod.CreationTimestamp.Time
+			} else if !nodeReady {
+				nodeNotReadySince = c.LastTransitionTime.Time
+			}
+			break
+		}
+	}
+
+	if nodeReady {
+		return false, nil
+	}
+
+	nodeNotReadyDuration := time.Since(nodeNotReadySince)
+	if nodeNotReadyDuration < threshold {
+		log.Info("节点 NotReady 时间未超过阈值", "node", pod.Spec.NodeName,
+			"duration", nodeNotReadyDuration)
+		return false, nil
+	}
+
+	log.Info("Pod Unknown 且节点 NotReady 超过阈值，触发自动恢复",
+		"pod", podName, "node", pod.Spec.NodeName, "duration", nodeNotReadyDuration)
+
+	return r.triggerRecovery(ctx, ps, pod, podName, "NodeNotReady",
+		fmt.Sprintf("节点 %s NotReady %v，Pod Unknown，正在删除 PVC 以触发重建", pod.Spec.NodeName, nodeNotReadyDuration))
+}
+
+// triggerRecovery 执行故障恢复：删除 Pod 和 PVC，触发 StatefulSet 重建
+func (r *PageserverReconciler) triggerRecovery(ctx context.Context, ps *neonv1alpha1.Pageserver, pod *corev1.Pod, podName, reason, message string) (bool, error) {
+	log := logf.FromContext(ctx)
+
+	_ = utils.PatchStatus(ctx, r.Client, ps, func(p *neonv1alpha1.Pageserver) {
+		utils.SetCondition(p, p.StatusConditions(), utils.ConditionNodeRecoveryInProgress,
+			metav1.ConditionTrue, reason, message)
+	})
+
+	if r.SCClient != nil {
+		clusterName := ps.Spec.Cluster
+		nodeID := ps.Spec.ID
+
+		node, err := r.SCClient.GetNode(ctx, clusterName, ps.Namespace, nodeID)
+		if err == nil && node.Scheduling != "Pause" && node.Scheduling != "Deleting" {
+			pausePolicy := "Pause"
+			if err := r.SCClient.ConfigureNode(ctx, clusterName, ps.Namespace, nodeID, nil, &pausePolicy); err != nil {
+				log.Info("ConfigureNode(Pause) 失败，继续执行恢复", "error", err)
+			} else {
+				log.Info("已将节点在 SC 中标记为 Pause", "nodeID", nodeID)
+			}
+		}
+	}
+
+	deleteOptions := &client.DeleteOptions{
+		GracePeriodSeconds: ptr.To(int64(0)),
+	}
+	if err := r.Delete(ctx, pod, deleteOptions); err != nil && !apierrors.IsNotFound(err) {
+		log.Error(err, "删除 Pod 失败")
+		return true, err
+	}
+
+	pvcName := pageserverspec.Name(ps) + "-" + storageVolumeName + "-0"
+	pvc := &corev1.PersistentVolumeClaim{}
+	if err := r.Get(ctx, types.NamespacedName{Name: pvcName, Namespace: ps.Namespace}, pvc); err == nil {
+		if err := r.Delete(ctx, pvc); err != nil {
+			log.Error(err, "删除 PVC 失败")
+			return true, err
+		}
+		log.Info("已删除 PVC，StatefulSet 将创建新 PVC 在新节点上", "pvc", pvcName)
+	}
+
+	return true, nil
 }
 
 // removePageserverFinalizer 移除 finalizer，允许 K8s 清理资源。
@@ -681,6 +877,9 @@ func (r *PageserverReconciler) removePageserverFinalizer(ctx context.Context, ps
 // storageVolumeName matches the volume claim template name in StatefulSet.
 const storageVolumeName = "pageserver-storage"
 
+// pageserverLabelKey 是打在 Pod/StatefulSet 上用于反向映射到 Pageserver CR 的 label。
+const pageserverLabelKey = "molnett.org/pageserver"
+
 func (r *PageserverReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&neonv1alpha1.Pageserver{}).
@@ -688,6 +887,28 @@ func (r *PageserverReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&corev1.Service{}).
 		Owns(&corev1.ConfigMap{}).
 		Owns(&policyv1.PodDisruptionBudget{}).
+		// 监听属于 pageserver 的 Pod 状态变化（phase、conditions、deletionTimestamp 等），
+		// 以便在节点故障导致 Pod 进入 Terminating/Ready=False 时及时触发故障恢复。
+		// Pod 的直接 Owner 是 StatefulSet 而非 Pageserver CR，无法用 Owns() 自动关联，
+		// 因此通过 pod label "molnett.org/pageserver" 反向映射到对应的 Pageserver CR。
+		// mapPodToPageserver 内部会过滤掉不含该 label 的 Pod，避免无关事件触发调和。
+		Watches(&corev1.Pod{},
+			handler.EnqueueRequestsFromMapFunc(r.mapPodToPageserver)).
 		Named("pageserver").
 		Complete(r)
+}
+
+// mapPodToPageserver 将 pageserver Pod 的事件映射为对应 Pageserver CR 的调和请求。
+// 通过 pod label "molnett.org/pageserver" 获取 CR 名称。
+func (r *PageserverReconciler) mapPodToPageserver(_ context.Context, obj client.Object) []reconcile.Request {
+	psName := obj.GetLabels()[pageserverLabelKey]
+	if psName == "" {
+		return nil
+	}
+	return []reconcile.Request{{
+		NamespacedName: types.NamespacedName{
+			Namespace: obj.GetNamespace(),
+			Name:      psName,
+		},
+	}}
 }

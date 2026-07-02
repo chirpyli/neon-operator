@@ -75,6 +75,14 @@ type PageserverConfig struct {
 	NodeFailure *NodeFailureRecoveryConfig `json:"nodeFailure,omitempty"`
 }
 
+// SafekeeperConfig 定义自动创建的 Safekeeper 的默认配置。
+type SafekeeperConfig struct {
+	// NodeFailure 控制节点故障时的自动恢复策略。
+	// 用于为自动创建的 Safekeeper 统一设置故障恢复行为。
+	// +optional
+	NodeFailure *NodeFailureRecoveryConfig `json:"nodeFailure,omitempty"`
+}
+
 // ClusterSpec defines the desired state of Cluster
 type ClusterSpec struct {
 	// Decides how many safekeepers to run in the cluster.
@@ -117,6 +125,10 @@ type ClusterSpec struct {
 	// auto-created safekeepers. If not set, defaults to Size=10Gi.
 	// +optional
 	DefaultSafekeeperStorage *StorageConfig `json:"defaultSafekeeperStorage,omitempty"`
+
+	// DefaultSafekeeperConfig 指定自动创建的 safekeeper 的默认配置。
+	// +optional
+	DefaultSafekeeperConfig *SafekeeperConfig `json:"defaultSafekeeperConfig,omitempty"`
 
 	// PostgresExposure 控制计算节点 PostgreSQL Service 对外暴露策略。
 	// 不设置时默认为 ClusterIP（仅集群内访问）。

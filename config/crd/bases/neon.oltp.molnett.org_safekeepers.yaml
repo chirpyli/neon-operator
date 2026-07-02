@@ -89,6 +89,20 @@ spec:
                     format: int32
                     type: integer
                 type: object
+              nodeFailure:
+                description: NodeFailure 控制节点故障时的自动恢复策略。
+                properties:
+                  autoRecover:
+                    description: |-
+                      AutoRecover 是否在节点宕机时自动删除 PVC 并重建。
+                      默认 false（需要人工确认），可设为 true 启用自动恢复。
+                    type: boolean
+                  maxPendingDuration:
+                    description: |-
+                      MaxPendingDuration 在判定 PVC 无法恢复前，Pod Pending 的最大等待时间。
+                      默认 5 分钟。
+                    type: string
+                type: object
               readinessProbe:
                 description: |-
                   ReadinessProbe overrides the default readiness probe configuration.

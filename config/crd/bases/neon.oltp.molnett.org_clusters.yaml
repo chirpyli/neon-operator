@@ -166,6 +166,26 @@ spec:
                     description: StorageSize 指定 PS 的 PVC 大小。
                     type: string
                 type: object
+              defaultSafekeeperConfig:
+                description: DefaultSafekeeperConfig 指定自动创建的 safekeeper 的默认配置。
+                properties:
+                  nodeFailure:
+                    description: |-
+                      NodeFailure 控制节点故障时的自动恢复策略。
+                      用于为自动创建的 Safekeeper 统一设置故障恢复行为。
+                    properties:
+                      autoRecover:
+                        description: |-
+                          AutoRecover 是否在节点宕机时自动删除 PVC 并重建。
+                          默认 false（需要人工确认），可设为 true 启用自动恢复。
+                        type: boolean
+                      maxPendingDuration:
+                        description: |-
+                          MaxPendingDuration 在判定 PVC 无法恢复前，Pod Pending 的最大等待时间。
+                          默认 5 分钟。
+                        type: string
+                    type: object
+                type: object
               defaultSafekeeperStorage:
                 description: |-
                   DefaultSafekeeperStorage defines the default storage config for
