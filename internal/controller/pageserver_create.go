@@ -107,20 +107,34 @@ func (r *PageserverReconciler) ensurePSAuthTokens(ctx context.Context, ps *neonv
 	controlPlaneAPIToken := string(secret.Data["pageserver_control_plane_token"])
 	safekeeperAuthToken := string(secret.Data["pageserver_safekeeper_token"])
 
-	// 如果两个 token 都已存在，直接复用，保持 ConfigMap/StatefulSet spec 稳定。
-	if controlPlaneAPIToken != "" && safekeeperAuthToken != "" {
-		return controlPlaneAPIToken, safekeeperAuthToken, nil
-	}
-
-	log.Info("正在生成新的 pageserver JWT token 并持久化到 Secret")
-
 	jm, err := utils.NewJWTManagerFromSecret(&secret)
 	if err != nil {
 		return "", "", fmt.Errorf("从 Secret %s 创建 JWT manager 失败: %w", secretName, err)
 	}
 
+	// 检查已有 token 是否过期，过期则需要重新签发。
+	tokenExpired := func(tokenStr string) bool {
+		return tokenStr != "" && jm.IsTokenExpired(tokenStr)
+	}
+	cpExpired := tokenExpired(controlPlaneAPIToken)
+	skExpired := tokenExpired(safekeeperAuthToken)
+	anyExpired := cpExpired || skExpired
+
+	// 如果两个 token 都已存在且未过期，直接复用，保持 ConfigMap/StatefulSet spec 稳定。
+	if !anyExpired && controlPlaneAPIToken != "" && safekeeperAuthToken != "" {
+		return controlPlaneAPIToken, safekeeperAuthToken, nil
+	}
+
+	if anyExpired {
+		log.Info("检测到 pageserver JWT token 已过期，重新生成",
+			"controlPlane_expired", cpExpired,
+			"safekeeper_expired", skExpired)
+	} else {
+		log.Info("正在生成新的 pageserver JWT token 并持久化到 Secret")
+	}
+
 	// 生成 control_plane_api_token（generations_api scope）
-	if controlPlaneAPIToken == "" {
+	if controlPlaneAPIToken == "" || cpExpired {
 		controlPlaneAPIToken, err = utils.GenerateUpcallToken(jm, ps.Spec.Cluster)
 		if err != nil {
 			return "", "", fmt.Errorf("生成 control_plane_api_token 失败: %w", err)
@@ -128,7 +142,7 @@ func (r *PageserverReconciler) ensurePSAuthTokens(ctx context.Context, ps *neonv
 	}
 
 	// 生成 safekeeper auth token（safekeeperdata scope）
-	if safekeeperAuthToken == "" {
+	if safekeeperAuthToken == "" || skExpired {
 		safekeeperAuthToken, err = utils.GenerateSafekeeperToken(jm, ps.Spec.Cluster)
 		if err != nil {
 			return "", "", fmt.Errorf("生成 safekeeper auth token 失败: %w", err)
