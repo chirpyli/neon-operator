@@ -1,0 +1,62 @@
+---
+# 外部 MinIO S3 凭证（运行在 slpc:9000，非 K8s 内部）
+apiVersion: v1
+kind: Secret
+metadata:
+  name: bucket-credentials
+  namespace: neon
+stringData:
+  AWS_ACCESS_KEY_ID: "minioadmin"
+  AWS_ENDPOINT_URL: "http://192.168.232.128:9000"
+  AWS_REGION: "us-east-1"
+  AWS_SECRET_ACCESS_KEY: "minioadmin"
+  BUCKET_NAME: "neondata"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: storage-controller-pg-cluster
+  namespace: neon
+type: Opaque
+stringData:
+  uri: "postgres://storage_controller:storage_controller@192.168.232.128:5432/storage_controller"
+
+---
+apiVersion: neon.oltp.molnett.org/v1alpha1
+kind: Cluster
+metadata:
+  name: my-cluster
+  namespace: neon
+spec:
+  numSafekeepers: 3                       # Safekeeper 数量，最少 3 个（共识要求）
+  numPageservers: 2                        # Pageserver 数量，默认 1（开发测试），生产 ≥ 2
+  defaultPGVersion: 17                     # 默认 PostgreSQL 版本：14/15/16/17
+  neonImage: "ghcr.io/neondatabase/neon:latest"      # Neon 组件镜像（外网；如不可用，改用本地 registry 路径）
+  bucketCredentialsSecret:
+    name: bucket-credentials               # 引用上面定义的 Secret → 外部 MinIO
+  storageControllerDatabaseSecret:
+    name: storage-controller-pg-cluster
+    key: uri
+  defaultPageserverConfig:                 # 自动创建的 Pageserver 默认配置
+    storageSize: 10Gi                      # PVC 大小
+    initialSchedulingPolicy: Active        # 新节点调度策略：Active | Filling
+    resources:                             # CPU/内存配置（可选，不设则使用 operator 内置默认值）
+      requests:
+        cpu: "1"
+        memory: 256Mi
+      limits:
+        cpu: "2"
+        memory: 1Gi
+    nodeFailure:                           # 节点故障自动恢复策略（可选）
+      autoRecover: true                   # 是否自动删除 PVC 重建（默认 false）
+      maxPendingDuration: 5m              # Pod Pending 判定阈值（默认 5m）
+  defaultSafekeeperStorage:
+    size: 8Gi
+  defaultSafekeeperConfig:                 # 自动创建的 Safekeeper 默认配置
+    nodeFailure:                           # 节点故障自动恢复策略（可选）
+      autoRecover: true                    # 是否自动删除 PVC 重建（默认 false）
+      maxPendingDuration: 5m               # Pod Pending/Terminating 判定阈值（默认 5m）
+  postgresExposure:    # 指定 计算节点Postgres 服务的暴露方式， 默认 ClusterIP， 因为没有proxy才需要进行设置，有proxy时，计算节点不对外进行暴露
+    type: NodePort
+

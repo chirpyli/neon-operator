@@ -1,0 +1,20 @@
+apiVersion: minio.min.io/v2
+kind: Tenant
+metadata:
+  name: minio
+  namespace: neon
+spec:
+  pools:
+    - name: pool-0
+      servers: 1          # 开发测试用 1 个 server
+      volumesPerServer: 1 # 1 个磁盘
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 8Gi
+  configuration:
+    name: minio-configuration
+  requestAutoCert: false   # 开发环境关闭 TLS
