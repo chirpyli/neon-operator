@@ -787,6 +787,40 @@ func buildPostgresSettings(clusterName string, safekeeperIDs []uint32, tenantID,
 		})
 	}
 
+	// For read_only (Replica) endpoints, configure native PostgreSQL streaming
+	// replication to receive WAL from safekeepers. This follows the neon_local
+	// control plane pattern (setup_pg_conf, ComputeMode::Replica branch):
+	//
+	//   primary_conninfo = 'host=<sk_hosts> port=<sk_ports>
+	//     options='-c timeline_id=<tid> tenant_id=<tid>'
+	//     application_name=replica replication=true'
+	//   primary_slot_name = 'repl_<timeline_id>_'
+	//
+	// Without this, PostgreSQL starts in hot standby mode (standby.signal present)
+	// but has no WAL source, causing "waiting for WAL to become available" forever.
+	if readOnly {
+		skHosts := make([]string, len(safekeeperIDs))
+		skPorts := make([]string, len(safekeeperIDs))
+		for i, id := range safekeeperIDs {
+			skHosts[i] = fmt.Sprintf("%s-safekeeper-%d.neon", clusterName, id)
+			skPorts[i] = "5454"
+		}
+		primaryConninfo := fmt.Sprintf(
+			"host=%s port=%s options='-c timeline_id=%s tenant_id=%s' application_name=replica replication=true",
+			strings.Join(skHosts, ","),
+			strings.Join(skPorts, ","),
+			timelineID,
+			tenantID,
+		)
+		primarySlotName := fmt.Sprintf("repl_%s_", timelineID)
+
+		entries = append(entries,
+			SettingsEntry{Name: "primary_conninfo", Value: primaryConninfo, Vartype: "string"},
+			SettingsEntry{Name: "primary_slot_name", Value: primarySlotName, Vartype: "string"},
+			SettingsEntry{Name: "hot_standby", Value: "on", Vartype: "bool"},
+		)
+	}
+
 	return entries
 }
 

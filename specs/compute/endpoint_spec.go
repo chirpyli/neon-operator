@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -246,8 +247,71 @@ func EndpointConfigMap(
 	// NOTE: values MUST be capitalized ("Primary"/"Replica") to match compute_ctl's
 	// Rust ComputeMode enum variants — lowercase will cause deserialization failure.
 	computeMode := "Primary"
-	if endpoint.Spec.Type == "read_only" {
+	readOnly := endpoint.Spec.Type == "read_only"
+	if readOnly {
 		computeMode = "Replica"
+	}
+
+	// 查询集群实际的 Safekeeper CR，构建 safekeeper 连接信息。
+	// 对 Replica 端点来说，这些信息用于构建 primary_conninfo，
+	// 让 PostgreSQL 通过原生流复制从 safekeeper 获取 WAL。
+	safekeeperIDs, err := listSafekeeperIDs(ctx, k8sClient, project.Spec.ClusterName)
+	if err != nil {
+		safekeeperIDs = fallbackSafekeeperIDs()
+	}
+	if len(safekeeperIDs) == 0 {
+		safekeeperIDs = fallbackSafekeeperIDs()
+	}
+
+	// 构建 neon.safekeepers GUC（walproposer 需要，所有模式都设置）
+	skParts := make([]string, len(safekeeperIDs))
+	for i, id := range safekeeperIDs {
+		skParts[i] = fmt.Sprintf("%s-safekeeper-%d.neon:5454", project.Spec.ClusterName, id)
+	}
+	neonSafekeepers := strings.Join(skParts, ",")
+
+	settings := []SettingsEntry{
+		{Name: "neon.tenant_id", Value: project.Spec.TenantID, Vartype: "string"},
+		{Name: "neon.timeline_id", Value: branch.Spec.TimelineID, Vartype: "string"},
+		{Name: "neon.safekeepers", Value: neonSafekeepers, Vartype: "string"},
+		{
+			Name:    "neon.safekeepers_auth_token",
+			Value:   safekeeperAuthToken,
+			Vartype: "string",
+		},
+	}
+
+	// For read_only (Replica) endpoints, configure native PostgreSQL streaming
+	// replication to receive WAL from safekeepers. Follows the neon_local
+	// control plane pattern (setup_pg_conf, ComputeMode::Replica branch):
+	//
+	//   primary_conninfo = 'host=<sk_hosts> port=<sk_ports>
+	//     options='-c timeline_id=<tid> tenant_id=<tid>'
+	//     application_name=replica replication=true'
+	//   primary_slot_name = 'repl_<timeline_id>_'
+	//
+	// Without this, PostgreSQL starts in hot standby mode but has no WAL source.
+	if readOnly {
+		skHosts := make([]string, len(safekeeperIDs))
+		skPorts := make([]string, len(safekeeperIDs))
+		for i, id := range safekeeperIDs {
+			skHosts[i] = fmt.Sprintf("%s-safekeeper-%d.neon", project.Spec.ClusterName, id)
+			skPorts[i] = "5454"
+		}
+		primaryConninfo := fmt.Sprintf(
+			"host=%s port=%s options='-c timeline_id=%s tenant_id=%s' application_name=replica replication=true",
+			strings.Join(skHosts, ","),
+			strings.Join(skPorts, ","),
+			branch.Spec.TimelineID,
+			project.Spec.TenantID,
+		)
+		primarySlotName := fmt.Sprintf("repl_%s_", branch.Spec.TimelineID)
+
+		settings = append(settings,
+			SettingsEntry{Name: "primary_conninfo", Value: primaryConninfo, Vartype: "string"},
+			SettingsEntry{Name: "primary_slot_name", Value: primarySlotName, Vartype: "string"},
+			SettingsEntry{Name: "hot_standby", Value: "on", Vartype: "bool"},
+		)
 	}
 
 	spec := computeSpec{
@@ -259,15 +323,7 @@ func EndpointConfigMap(
 			Name:      project.Name,
 			Roles:     roles,
 			Databases: databases,
-			Settings: []SettingsEntry{
-				{Name: "neon.tenant_id", Value: project.Spec.TenantID, Vartype: "string"},
-				{Name: "neon.timeline_id", Value: branch.Spec.TimelineID, Vartype: "string"},
-				{
-					Name:    "neon.safekeepers_auth_token",
-					Value:   safekeeperAuthToken,
-					Vartype: "string",
-				},
-			},
+			Settings:  settings,
 		},
 	}
 	spec.ComputeCtlConfig.JWKS = utils.JWKResponse{Keys: []*utils.JWK{jwk}}
@@ -475,4 +531,12 @@ func EndpointPostgresService(endpoint *neonv1alpha1.Endpoint, branch *neonv1alph
 
 func endpointDeploymentName(endpoint *neonv1alpha1.Endpoint) string {
 	return fmt.Sprintf("endpoint-%s", endpoint.Name)
+}
+
+// fallbackSafekeeperIDs returns default safekeeper IDs {1, 2, 3} when
+// safekeeper CR discovery fails. This mirrors the fallback logic in
+// GenerateComputeSpec (spec.go) and ensures endpoints can still be
+// created even if the safekeeper listing is temporarily unavailable.
+func fallbackSafekeeperIDs() []uint32 {
+	return []uint32{1, 2, 3}
 }
