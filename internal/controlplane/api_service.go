@@ -613,7 +613,7 @@ func (s *apiService) CreateBranch(ctx context.Context, projectID string, req Bra
 	// 创建可选的 Endpoints
 	endpoints := make([]EndpointResponse, 0, len(req.Endpoints))
 	for _, ep := range req.Endpoints {
-		epResp, err := s.createEndpointForBranch(ctx, project, branchID, ep)
+		epResp, err := s.createEndpointForBranch(ctx, project, branch, ep)
 		if err != nil {
 			s.log.Error("failed to create endpoint for branch", "error", err)
 			continue
@@ -882,7 +882,6 @@ func (s *apiService) toBranchResponse(branch *neonv1.Branch, projectID string) *
 func (s *apiService) CreateEndpoint(ctx context.Context, projectID string, req EndpointCreateRequest) (*CreatedEndpointResponse, error) {
 	now := time.Now()
 
-	// 验证 Branch 存在且在项目内
 	branch := &neonv1.Branch{}
 	if err := s.k8sClient.Get(ctx, client.ObjectKey{Name: req.Endpoint.BranchID, Namespace: s.namespace}, branch); err != nil {
 		if isNotFound(err) {
@@ -897,7 +896,7 @@ func (s *apiService) CreateEndpoint(ctx context.Context, projectID string, req E
 	epResp, err := s.createEndpointForBranch(ctx, &neonv1.Project{
 		ObjectMeta: metav1.ObjectMeta{Name: projectID, Namespace: s.namespace},
 		Spec:       neonv1.ProjectSpec{PGVersion: branch.Spec.PGVersion},
-	}, req.Endpoint.BranchID, EndpointPayload{
+	}, branch, EndpointPayload{
 		Type:      req.Endpoint.Type,
 		Resources: req.Endpoint.Resources,
 		Exposure:  req.Endpoint.Exposure,
@@ -938,16 +937,15 @@ func (s *apiService) CreateEndpoint(ctx context.Context, projectID string, req E
 	}, nil
 }
 
-func (s *apiService) createEndpointForBranch(ctx context.Context, project *neonv1.Project, branchID string, ep EndpointPayload) (*EndpointResponse, error) {
+func (s *apiService) createEndpointForBranch(ctx context.Context, project *neonv1.Project, branch *neonv1.Branch, ep EndpointPayload) (*EndpointResponse, error) {
 	now := time.Now()
 	endpointID := generateResourceID("ep")
+	branchID := branch.Name
 	epType := ep.Type
 	if epType == "" {
 		epType = "read_write"
 	}
 
-	// Per Neon design: at most one read_write endpoint per branch.
-	// Reject if the branch already has a read_write endpoint and we're trying to create another.
 	if epType == "read_write" {
 		var existingEndpoints neonv1.EndpointList
 		if err := s.k8sClient.List(ctx, &existingEndpoints, client.InNamespace(s.namespace)); err != nil {
@@ -974,10 +972,7 @@ func (s *apiService) createEndpointForBranch(ctx context.Context, project *neonv
 				"molnett.org/branch": branchID,
 			},
 			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(
-					&neonv1.Branch{ObjectMeta: metav1.ObjectMeta{Name: branchID, Namespace: s.namespace}},
-					neonv1.GroupVersion.WithKind("Branch"),
-				),
+				*metav1.NewControllerRef(branch, neonv1.GroupVersion.WithKind("Branch")),
 			},
 		},
 		Spec: neonv1.EndpointSpec{

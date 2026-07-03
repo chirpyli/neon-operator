@@ -3,8 +3,6 @@ package controlplane
 import (
 	"encoding/json"
 	"time"
-
-	corev1 "k8s.io/api/core/v1"
 )
 
 // =============================================================================
@@ -369,29 +367,6 @@ type ErrorResponse struct {
 	Message string `json:"message"`
 }
 
-// ---------- compute_ctl 兼容类型 ----------
-
-// Cluster在ComputeSpec中的定义 (复制以避免循环依赖)
-type clusterDef struct {
-	ClusterID string        `json:"cluster_id"`
-	Name      string        `json:"name"`
-	Roles     []clusterRole `json:"roles"`
-	Databases []clusterDB   `json:"databases"`
-}
-
-type clusterRole struct {
-	Name        string `json:"name"`
-	Password    string `json:"password,omitempty"`
-	ConnLimit   int    `json:"conn_limit,omitempty"`
-	IsSuperuser bool   `json:"is_superuser,omitempty"`
-	CanLogin    bool   `json:"can_login,omitempty"`
-}
-
-type clusterDB struct {
-	Name      string `json:"name"`
-	OwnerName string `json:"owner_name"`
-}
-
 // ---------- 资源限制检查类型 ----------
 
 // ResourceQuota 资源配额 (Phase 3+)
@@ -409,18 +384,6 @@ type GeneratedIDs struct {
 	TenantID   string
 	TimelineID string
 	OpID       string
-}
-
-// computeSpecData 传递给 compute_ctl 的完整 spec 数据
-type computeSpecData struct {
-	TenantID              string                       `json:"tenant_id"`
-	TimelineID            string                       `json:"timeline_id"`
-	PageserverConnInfo    interface{}                  `json:"pageserver_conn_info,omitempty"`
-	SafekeeperConnstrings []string                     `json:"safekeeper_connstrings,omitempty"`
-	StorageAuthToken      string                       `json:"storage_auth_token,omitempty"`
-	Cluster               clusterDef                   `json:"cluster"`
-	Mode                  string                       `json:"mode,omitempty"`
-	Resources             *corev1.ResourceRequirements `json:"resources,omitempty"`
 }
 
 // ---------- Branch PATCH types ----------

@@ -155,6 +155,12 @@ type ComputeSpec struct {
 	// 该值通过 NEON_AUTH_TOKEN 环境变量传入 compute 节点，作为 JWT 密码完成 safekeeper
 	// 的 JWT 认证。walproposer 源码 libpagestore.c 中硬编码读取此环境变量。
 	StorageAuthToken string `json:"storage_auth_token,omitempty"`
+	// Mode 指定 compute 启动模式。
+	// "Primary" (read_write): WAL proposer，参与 safekeeper 共识。
+	// "Replica" (read_only): WAL follower，动态跟随分支 tip（hot standby）。
+	// 值必须首字母大写以匹配 compute_ctl 的 Rust ComputeMode 枚举。
+	// 缺省时默认为 Primary。
+	Mode string `json:"mode,omitempty"`
 }
 
 // ComputeSpecResponse represents the complete JSON response
@@ -381,7 +387,16 @@ func GenerateComputeSpec(
 	// default to read-write mode for backward compatibility.
 	endpointType := deployment.GetLabels()["molnett.org/endpoint-type"]
 	readOnly := endpointType == "read_only"
-	log.Info("Compute endpoint type", "type", endpointType, "readOnly", readOnly)
+	// Map endpoint type to compute_ctl mode:
+	//   read_write → "Primary" (WAL proposer, synced safekeepers)
+	//   read_only  → "Replica" (WAL follower, hot standby, no WAL proposal)
+	// NOTE: values MUST be capitalized ("Primary"/"Replica") to match compute_ctl's
+	// Rust ComputeMode enum variants — lowercase will cause deserialization failure.
+	computeMode := "Primary"
+	if readOnly {
+		computeMode = "Replica"
+	}
+	log.Info("Compute endpoint type", "type", endpointType, "readOnly", readOnly, "mode", computeMode)
 
 	// 6. 生成 safekeeper WAL 端口 JWT 认证 token（scope=safekeeperdata）
 	// 直接读取 JWT Secret 获取私钥签发 token
@@ -459,6 +474,7 @@ func GenerateComputeSpec(
 					DeltaOperations:       []interface{}{},
 					SafekeeperConnstrings: safekeeperConnstrings,
 					StorageAuthToken:      safekeeperAuthToken,
+					Mode:                  computeMode,
 					PageserverConnectionInfo: PageserverConnectionInfo{
 						ShardCount: 0,
 						Shards:     map[string]PageserverShardInfo{},
@@ -522,6 +538,7 @@ func GenerateComputeSpec(
 			DeltaOperations:       []interface{}{},
 			SafekeeperConnstrings: safekeeperConnstrings,
 			StorageAuthToken:      safekeeperAuthToken,
+			Mode:                  computeMode,
 			PageserverConnectionInfo: PageserverConnectionInfo{
 				ShardCount: len(shards),
 				Shards:     shards,

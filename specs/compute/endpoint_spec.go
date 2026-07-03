@@ -227,6 +227,11 @@ func EndpointConfigMap(
 		// compute_ctl 从 spec 中读取此字段并设置为 NEON_AUTH_TOKEN 环境变量，
 		// walproposer 通过 libpagestore.c 硬编码读取该环境变量完成 JWT 认证。
 		StorageAuthToken string `json:"storage_auth_token,omitempty"`
+		// Mode 指定 compute 启动模式。
+		// "Primary" (read_write): WAL proposer，参与 safekeeper 共识。
+		// "Replica" (read_only): WAL follower，动态跟随分支 tip（hot standby）。
+		// 值必须首字母大写以匹配 compute_ctl 的 Rust ComputeMode 枚举。
+		Mode string `json:"mode,omitempty"`
 	}
 
 	// 聚合 roles：默认 postgres + 从 Role CR 聚合的用户角色
@@ -235,9 +240,20 @@ func EndpointConfigMap(
 	// 聚合 databases：从 Database CR 聚合
 	databases := aggregateDatabases(ctx, k8sClient, branch.Name)
 
+	// Map Endpoint type to compute_ctl mode:
+	//   read_write → "Primary" (WAL proposer)
+	//   read_only  → "Replica" (WAL follower, hot standby)
+	// NOTE: values MUST be capitalized ("Primary"/"Replica") to match compute_ctl's
+	// Rust ComputeMode enum variants — lowercase will cause deserialization failure.
+	computeMode := "Primary"
+	if endpoint.Spec.Type == "read_only" {
+		computeMode = "Replica"
+	}
+
 	spec := computeSpec{
 		FormatVersion:    "1.0",
 		StorageAuthToken: safekeeperAuthToken,
+		Mode:             computeMode,
 		Cluster: clusterConfig{
 			ClusterID: project.Spec.TenantID,
 			Name:      project.Name,
